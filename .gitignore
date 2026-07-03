@@ -28,3 +28,8 @@ MANIFEST
 
 .idea/
 *.iml
+
+dependencies/
+logs/
+specimin/
+analysis_agent_workspace/

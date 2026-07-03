@@ -1,10 +1,20 @@
+import os
+
 from minisweagent.models.litellm_model import LitellmModel
-from minisweagent.environments.docker import DockerEnvironment
+from minisweagent.environments.local import LocalEnvironment
 from analysis_agent.mini_orchestrator import run_with_attempts
 
 def enable_checkers(target_name: str, target_url: str, tool_name: str, tool_url: str):
+    cwd = f"targets/{target_name}"
+
+    if os.path.exists(cwd):
+        return None
+
     model = LitellmModel(model_name="gpt-5")
-    env = DockerEnvironment(image="ubuntu:22.04")
+    env = LocalEnvironment(
+        cwd=cwd,
+        timeout=60,
+    )
 
     success, message = run_with_attempts(
         model=model,

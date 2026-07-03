@@ -1,0 +1,12 @@
+[project]
+name = "false-positives-miner"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "software-analysis-agent",
+]
+
+[tool.uv.sources]
+software-analysis-agent = { git = "https://github.com/islem-esi/software-analysis-agent.git" }

@@ -33,3 +33,10 @@ dependencies/
 logs/
 specimin/
 analysis_agent_workspace/
+targets/
+replay/
+workspace/
+cf/
+failed_minimizations.txt
+
+.env

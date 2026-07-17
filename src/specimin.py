@@ -9,14 +9,8 @@ specimin = "specimin"
 specimin_url = "https://github.com/njit-jerse/specimin.git"
 specimin_branch = "main"
 
-failed_minimizations_log = Path("failed_minimizations.txt")
-failed_preservations_log = Path("failed_preservations.txt")
-failed_compilations_log = Path("failed_compilations.txt")
-
 
 def setup():
-    failed_minimizations_log.unlink(missing_ok=True)
-
     if os.getenv("SPECIMIN"):
         print("Specimin already exists: using local copy")
         return
@@ -61,6 +55,14 @@ def _guess_root(error: CheckerError, targets: list[str]):
 
 
 def minimize(error: CheckerError, targets: list[str], nullaway: bool, target_project_dir: Path, output_dir: Path):
+    """Runs Specimin to minimize the given error.
+
+    Returns (success, cmd), where `cmd` is the exact Specimin invocation that
+    was run. The caller is responsible for logging failures (via
+    FailureLogger.log_failed_minimization) using the returned `cmd` — this
+    keeps all failure logging centralized in one place instead of scattered
+    across modules.
+    """
     root = _guess_root(error, targets)
 
     specimin_args = [
@@ -87,36 +89,10 @@ def minimize(error: CheckerError, targets: list[str], nullaway: bool, target_pro
         print("Already minimized. Skipping.")
         return True, cmd
 
-    result = subprocess.run(["./gradlew", "run", f"--args={specimin_args_as_str}"],
+    result = subprocess.run(["./gradlew", "run", f"--args={specimin_args_as_str}", "-PskipCheckerFramework"],
                             cwd=os.getenv("SPECIMIN") or specimin,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     if result.returncode != 0:
-        add_to_failed_minimizations(cmd)
-
         return False, cmd
     return True, cmd
-
-
-def add_to_failed_minimizations(specimin_cmd: str):
-    with open(failed_minimizations_log, "a", encoding="utf-8") as file:
-        file.write(specimin_cmd + "\n\n")
-
-
-def add_to_failed_preservations(log_dir: Path, expected: CheckerError, errors: list[CheckerError], specimin_cmd: str):
-    with open(log_dir / failed_preservations_log, "w", encoding="utf-8") as file:
-        file.write(specimin_cmd + "\n\n")
-
-        file.write(f"Expected:\n{expected.raw}\n\n")
-
-        for error in errors:
-            file.write(f"{error.raw}\n")
-
-
-def add_to_failed_compilations(log_dir: Path, errors: list[CheckerError], specimin_cmd: str):
-    with open(log_dir / failed_compilations_log, "w", encoding="utf-8") as file:
-        file.write(specimin_cmd + "\n\n")
-
-        for error in errors:
-            if error.is_compilation_error():
-                file.write(f"{error.raw}\n")

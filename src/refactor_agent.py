@@ -1,15 +1,62 @@
 import json
+import logging
 import os
 import shutil
-import subprocess
+import time
 from pathlib import Path
 
+import checker_framework
 from attr import dataclass
-from utils import parse_errors_from_checker_output, read_file_with_numbered_lines, CheckerError
+from pydantic_ai import Agent, UsageLimits, RunContext
+from rate_limiter import GLOBAL_MODEL_RATE_LIMITER
+from tenacity import (
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential_jitter,
+    before_sleep_log,
+)
+from utils import read_file_with_numbered_lines, CheckerError, \
+    run_checker_and_parse_errors
 
-from pydantic_ai import Agent, UsageLimits
+logger = logging.getLogger(__name__)
 
-MAX_FINISH_ATTEMPTS = 5
+MAX_FINISH_ATTEMPTS = 3
+REQUEST_LIMIT = 20
+
+# Minimum seconds between two run_checker() calls from the *same* agent
+# session. This forces the model to actually batch edits (as the prompt
+# already asks it to) instead of calling run_checker() after every single
+# str_replace, which was one of the biggest sources of wasted requests.
+MIN_SECONDS_BETWEEN_CHECKER_RUNS = 8
+
+
+def _is_rate_limit_or_service_unavailable_error(exc: BaseException) -> bool:
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+    if status in (429, 503):
+        return True
+
+    msg = str(exc).lower()
+    return any(
+        needle in msg
+        for needle in (
+            "rate limit",
+            "rate_limit",
+            "429",
+            "resource_exhausted",
+            "resource exhausted",
+            "quota",
+            "too many requests",
+            "503",
+            "service unavailable",
+            "unavailable",
+            "overloaded",
+        )
+    )
+
 
 @dataclass
 class RefactorAgentRun:
@@ -18,21 +65,33 @@ class RefactorAgentRun:
     error: str | None = None
     not_possible_reason: str | None = None
 
+
 class RefactorAgent:
-    def __init__(self, orig_directory: Path, run_checker_cmd: list[str], checker_name: str, errors_to_ignore: list[CheckerError]):
+    def __init__(self, orig_directory: Path, checker_name: str,
+                 error: CheckerError,
+                 errors_to_ignore: list[CheckerError]):
         self.orig_directory = orig_directory
-        self.modified_directory = orig_directory / "../modified"
-        self.run_checker_cmd = run_checker_cmd
+        self.modified_directory = orig_directory.parent / "modified"
+        self.run_checker_cmd = checker_framework.get_command_for_checker(checker_name, self.modified_directory)
         self.checker_name = checker_name.split('.')[-1]
-        self.errors_to_ignore = set([err.content for err in errors_to_ignore])
 
         if os.path.exists(self.modified_directory):
             shutil.rmtree(self.modified_directory)
 
         shutil.copytree(str(self.orig_directory), self.modified_directory)
 
+        error.file_path = error.file_path.replace(str(orig_directory), str(self.modified_directory))
+        error.raw = error.raw.replace(str(orig_directory), str(self.modified_directory))
+
+        for e in errors_to_ignore:
+            e.file_path = e.file_path.replace(str(orig_directory), str(self.modified_directory))
+            e.raw = e.raw.replace(str(orig_directory), str(self.modified_directory))
+
+        self.error_to_fix = error
+        self.errors_to_ignore = errors_to_ignore
+
         self.agent = Agent(
-            "gemini:gemini-3.1-flash-lite"
+            os.environ["REFACTOR_AGENT_MODEL"]
         )
 
         self.finished = False
@@ -40,9 +99,10 @@ class RefactorAgent:
         self.possible = True
         self.finish_attempts = 0
         self.not_possible_reason = None
+        self._last_checker_run_time: float | None = None
 
         @self.agent.tool
-        def run_checker() -> str:
+        def run_checker(ctx: RunContext[None]) -> str:
             """Runs the checker analysis on the modified
             directory and return a JSON string describing the result.
 
@@ -57,9 +117,36 @@ class RefactorAgent:
               }
 
             success is true only if the build produced zero errors.
-            Always call this after making edits to verify they didn't
-            break compilation or introduce new errors.
+
+            IMPORTANT - this is comparatively expensive. Do not call it after
+            every individual edit. Batch several related str_replace calls
+            together first, then call this once to check the whole batch.
+            If you call this again too soon after a previous call, it will
+            be rejected without running the checker.
             """
+            # Every tool call sits between two model requests (the one that
+            # produced this call, and the one that will fire once we return
+            # a result). Throttling here paces the *next* request, since
+            # run_sync's internal loop gives us no other hook to gate on.
+            GLOBAL_MODEL_RATE_LIMITER.acquire()
+
+            if self._last_checker_run_time is not None:
+                elapsed = time.monotonic() - self._last_checker_run_time
+                if elapsed < MIN_SECONDS_BETWEEN_CHECKER_RUNS:
+                    wait_left = MIN_SECONDS_BETWEEN_CHECKER_RUNS - elapsed
+                    return json.dumps({
+                        "success": False,
+                        "error_count": -1,
+                        "errors": [],
+                        "message": (
+                            f"run_checker() was called too soon after the previous "
+                            f"call ({elapsed:.1f}s ago). Make more edits first and "
+                            f"batch them - try again in about {wait_left:.0f}s worth "
+                            "of additional work, not by waiting idly."
+                        ),
+                    })
+
+            self._last_checker_run_time = time.monotonic()
             errors = self._run_checker()
 
             payload = {
@@ -71,16 +158,21 @@ class RefactorAgent:
             return json.dumps(payload)
 
         @self.agent.tool
-        def view_file(relative_path: str) -> str:
+        def view_file(ctx: RunContext[None], relative_path: str) -> str:
             """View the current contents of a file in the modified directory,
             with line numbers prefixed followed by a tab (i.e., '12\tsome code').
             Line numbers are for your reference only - do NOT include them
             when constructing old_str for str_replace.
 
-            You MUST call this immediately before str_replace on a file if
-            you haven't viewed it in your most recent turn, since prior edits
-            may have changed its contents.
+            You already have the full numbered contents of every file from
+            the initial prompt, and str_replace's success response includes
+            fresh context around each edit you make. Only call this if a
+            str_replace call failed (old_str not found / not unique) and you
+            need to re-sync on a file's true current contents - do not call
+            it routinely before edits you're already confident about.
             """
+            GLOBAL_MODEL_RATE_LIMITER.acquire()
+
             path = (self.modified_directory / relative_path).resolve()
             if not str(path).startswith(str(self.modified_directory.resolve())):
                 return f"Error: path escapes modified directory: {relative_path}"
@@ -91,14 +183,14 @@ class RefactorAgent:
             return numbered
 
         @self.agent.tool
-        def str_replace(relative_path: str, old_str: str, new_str: str) -> str:
+        def str_replace(ctx: RunContext[None], relative_path: str, old_str: str, new_str: str) -> str:
             """Replace an exact block of text in a file with new text.
 
             old_str must match the file's raw content EXACTLY (no line number
             prefixes, exact whitespace) and must appear exactly once in the
             file. If it appears zero times or more than once, the edit is
             rejected and no changes are made - in that case, call view_file
-            again to get fresh content and widen old_str with a bit more
+            to get fresh content and widen old_str with a bit more
             surrounding context (i.e., an extra line above/below) until it is
             unique.
 
@@ -106,8 +198,11 @@ class RefactorAgent:
               {"success": bool, "message": str}
 
             On success, message includes a few lines of context around the
-            edit so you can confirm the change landed correctly.
+            edit so you can confirm the change landed correctly - use this
+            instead of calling view_file again on the same file.
             """
+            GLOBAL_MODEL_RATE_LIMITER.acquire()
+
             path = (self.modified_directory / relative_path).resolve()
             if not str(path).startswith(str(self.modified_directory.resolve())):
                 return json.dumps({
@@ -151,7 +246,7 @@ class RefactorAgent:
             ctx_start = max(0, replaced_start - 2)
             ctx_end = min(len(new_lines), replaced_start + new_str.count("\n") + 3)
             context = "\n".join(
-                f"{i+1:d}\t{new_lines[i]}" for i in range(ctx_start, ctx_end)
+                f"{i + 1:d}\t{new_lines[i]}" for i in range(ctx_start, ctx_end)
             )
 
             return json.dumps({
@@ -160,7 +255,7 @@ class RefactorAgent:
             })
 
         @self.agent.tool
-        def not_possible(reason: str) -> str:
+        def not_possible(ctx: RunContext[None], reason: str) -> str:
             """Call this if, after investigation, you conclude there is no way to
             fix the checker error(s) while keeping the code semantically
             equivalent to the original - i.e., any fix you can find would change
@@ -180,6 +275,8 @@ class RefactorAgent:
             Returns:
                 JSON string: {"finished": true, "possible": false, "reason": str}
             """
+            GLOBAL_MODEL_RATE_LIMITER.acquire()
+
             self.finished = True
             self.possible = False
             self.not_possible_reason = reason
@@ -190,8 +287,8 @@ class RefactorAgent:
             })
 
         @self.agent.tool
-        def finish() -> str:
-            """Call this ONLY when you believe your assigned target error is
+        def finish(ctx: RunContext[None]) -> str:
+            """Call this ONLY when you are confident your assigned target error is
             resolved. This re-runs the checker and verifies specifically that
             your target error is gone - other pre-existing errors elsewhere in
             the codebase do not block this from succeeding.
@@ -201,13 +298,16 @@ class RefactorAgent:
             limited number of times. If you call it repeatedly without actually
             resolving the target error, the session will be forcibly terminated
             as a failure - so do not call finish() speculatively or as a way to
-            "check in." Only call it once you have already confirmed via
-            run_checker() that you expect it to pass.
+            "check in." Only call it once you are confident that your edit resolves
+            the error, does not introduce any additional errors, and preserves
+            the semantics of the original method.
 
             Returns:
                 JSON string: {"finished": bool, "success": bool,
                                "error_count": int, "errors": [...], "message": str}
             """
+            GLOBAL_MODEL_RATE_LIMITER.acquire()
+
             self.finish_attempts += 1
             errors = self._run_checker()
 
@@ -243,6 +343,7 @@ class RefactorAgent:
                 })
 
             self.finished = True
+            self.success = True
             return json.dumps({
                 "finished": True,
                 "success": True,
@@ -251,18 +352,18 @@ class RefactorAgent:
                 "message": "Checker passed with zero errors. Session complete.",
             })
 
-    def run(self, error: CheckerError) -> RefactorAgentRun:
+    def run(self) -> RefactorAgentRun:
         """
         Runs the agent on the given error.
-        :param error: The error to fix. Ensure that you rerun on the Speciminified project before passing this in.
         """
-        initial_prompt = self._build_initial_prompt(error)
+        initial_prompt = self._build_initial_prompt()
 
         result = RefactorAgentRun()
 
         try:
-            self.agent.run(initial_prompt, usage_limits=UsageLimits(request_limit=40))
+            self._run_sync_with_rate_limit_retry(initial_prompt)
         except Exception as e:
+            # TODO: handle 503
             result.error = f"Agent run failed or exhausted limits: {e}"
             return result
 
@@ -280,21 +381,36 @@ class RefactorAgent:
 
         return result
 
-    def _run_checker(self) -> list[CheckerError]:
-        result = subprocess.run(
-            self.run_checker_cmd, capture_output=True, text=True
+    @retry(
+        retry=retry_if_exception(_is_rate_limit_or_service_unavailable_error),
+        wait=wait_exponential_jitter(initial=2, max=60, jitter=3),
+        stop=stop_after_attempt(6),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
+    def _run_sync_with_rate_limit_retry(self, prompt: str):
+        # Proactively throttle before every top-level run - blocks until a
+        # token is available instead of firing and hoping.
+        GLOBAL_MODEL_RATE_LIMITER.acquire()
+
+        return self.agent.run_sync(
+            prompt, usage_limits=UsageLimits(request_limit=REQUEST_LIMIT)
         )
 
-        errors = parse_errors_from_checker_output(result.stderr) if result.returncode != 0 else []
-        errors = [error for error in errors if error.content not in self.errors_to_ignore]
+    def _run_checker(self) -> list[str]:
+        errors = run_checker_and_parse_errors(self.run_checker_cmd, self.modified_directory)
+        errors = [
+            error.raw
+            for error in errors
+            if error.is_compilation_error() or not any(error.likely_equals(e) for e in self.errors_to_ignore)
+        ]
 
         return errors
 
-    def _build_initial_prompt(self, error: CheckerError) -> str:
+    def _build_initial_prompt(self) -> str:
         """
         Builds the initial prompt for the agent, including the task description,
         the files in the project, and the specific error to fix.
-        :param error: The error. Ensure that you rerun on the Speciminified project before passing this in.
         :return: the prompt
         """
         file_blocks = []
@@ -305,13 +421,13 @@ class RefactorAgent:
 
         files_section = "\n\n".join(file_blocks)
 
-        error_as_string = f"{error.file_path}:{error.line_number}: {error.content}"
-
         return f"""You are fixing Checker Framework {self.checker_name} errors in a Java project.
 
 ## Task
 The project above fails Checker Framework's {self.checker_name} Checker with 
-exactly ONE error: {error_as_string}
+exactly ONE error:
+
+{self.error_to_fix.raw}
 
 Your job is to refactor the code so that:
 
@@ -324,49 +440,63 @@ Semantically equivalent means, at minimum:
 - No change to public method signatures' behavior as observed by callers
   (return values, thrown exceptions, side effects) for any input that was
   previously valid.
-- Absolutely no suppression of the error via @SuppressWarnings, A suppression
+- Absolutely no suppression of the error via @SuppressWarnings. A suppression
   is not a fix, it's hiding the question.
 - No deletion of the logic that produces the warning in order to make the
-  warning disappear. Removing or adding a null check, a field, or a code
-  path is not a refactor, it's a behavior change.
-- Prefer the most localized fix: a narrowing check, a corrected annotation
-  (@Nullable / @NonNull), an Optional where the codebase already uses
-  Optional, or a small restructuring of control flow - over anything that
-  touches unrelated code.
+  warning disappear. Removing or adding a null check, a field, a throw,
+  or a code path is not a refactor, it's a behavior change.
+- Prefer the smallest, most localized, semantics-preserving transformation.
+  Avoid changes to unrelated code, broad refactorings, or unnecessary annotation
+  changes.
 
 While working through this codebase, you may notice code that would also
 trigger this checker. You must leave it alone - it is out of scope for
-this task even if it looks like an easy fix. run_checker() accounts for
+this task even if it looks like an easy fix. `run_checker` accounts for
 these cases, so you can always trust its output.
+
+You will also notice that most definitions have been stubbed out. This is
+by design. You should not modify those stubs, and you should keep your edits
+to the target, non-stub method unless a change must be made elsewhere.
 
 If, after investigating, you determine there is NO refactor that both (a)
 fixes the error and (b) preserves semantic equivalence - for example, the
 error reflects a genuine possible null dereference that the original code
 never actually guarded against, and any real fix would necessarily change
-behavior on some input - do not force a fix. Call not_possible() with an
+behavior on some input - do not force a fix. Call `not_possible` with an
 explanation of why. Do not attempt to disguise a behavior change as a
 "fix" merely to make the checker pass.
 
 ## Files in the project
 The line numbers shown below are for your reference only - do NOT include
-them when constructing old_str for str_replace. All paths are relative to
-the project root.
+them when constructing old_str for `str_replace`. All paths are relative to
+the project root. You already have the full current contents of every file
+right here - do not call `view_file` for a file you haven't edited yet.
+In your edits, you may assume that the Checker Framework is on the classpath.
 
 {files_section}
 
 ## How to work
-1. For the given error, make the smallest edit that fixes it using str_replace.
-   If old_str is rejected as not found or not unique, call view_file on
-   that specific file to get fresh content before retrying.
-2. After a batch of related edits, call run_checker() again to check
-   progress before continuing. Ensure you do not introduce additional
+1. For the given error, make the smallest edit that fixes it using `str_replace`.
+   Calling `str_replace` with your edit MUST be your FIRST action, since you have
+   already been given the error you need to fix, alongside the files in this
+   project. You shall not call `view_file` or `run_checker` before trying
+   `str_replace` at least once. Trust the numbered file contents above as ground
+   truth until you have edited a file yourself. If old_str is rejected as not
+   found or not unique, THEN call `view_file` on that specific file to get fresh
+   content before retrying.
+2. Batch several related edits together before calling `run_checker` -
+   it's comparatively expensive, so don't call it after every single
+   `str_replace`. Only call it once you believe you've made all the edits
+   needed for this batch. Ensure that you do not introduce additional
    Checker Framework errors/warnings and that you do not cause the code
    to be uncompilable.
-3. Once you believe all errors are resolved, call finish(). finish()
+3. Once you believe all errors are resolved, call `finish`. `finish`
    re-runs the checker itself - if errors remain, you'll get them back and
-   must keep working. Do not call finish() until you have already confirmed
-   via run_checker() that you expect it to pass.
-4. Do not guess at file contents from memory. Every edit must be based on
-   content you have actually viewed in this session, either from the
-   listing above or a subsequent view_file call.
+   must keep working. Do not call `finish` until you have already confirmed
+   via `run_checker` that you expect it to pass. `finish` may only be
+   called a limited number of times, so don't call it speculatively.
+4. Do not guess at file contents from memory beyond what's shown above.
+   Every edit must be based on content you have actually seen in this
+   session - the listing above, a `view_file` call, or a `str_replace`
+   confirmation.
 """

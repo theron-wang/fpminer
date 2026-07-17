@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import faulthandler
 import json
 import os
 import subprocess
@@ -12,7 +13,12 @@ import dotenv
 import specimin
 from autobuilding import enable_checkers
 from java_parser import get_target_signature_and_modularity_model
+from logger import FailureLogger
+from more_itertools import first
+from refactor_agent import RefactorAgent
 from utils import run_checker_and_parse_errors
+
+faulthandler.enable()
 
 checker_framework_url = "https://github.com/typetools/checker-framework/"
 
@@ -30,13 +36,15 @@ def ensure_posix_and_docker():
         exit(1)
 
 
-def run(target: Target, checkers: list[str]):
-    # use the first checker; we will modify the resulting dockerfile for the other checkers
+def run(target: Target, checkers: list[str], flog: FailureLogger):
+    flog.start_target(target.name)
+
     success, command = enable_checkers(target.name, target.url, checkers[0], checker_framework_url)
 
     repo_dir = Path(f"targets/{target.name}")
 
     if not success:
+        flog.logger.error("Failed to enable checkers for %s", target.name)
         print(f"Failed to enable checkers for {target.name}")
         return
 
@@ -48,39 +56,61 @@ def run(target: Target, checkers: list[str]):
     for index, error in enumerate(errors):
         print()
         print(f"Beginning processing of error {index + 1} / {len(errors)} ======>")
+        flog.log_error_start(target.name, checkers[0], index + 1, len(errors))
 
-        targets, nullaway = get_target_signature_and_modularity_model(repo_dir, error)
+        try:
+            targets, nullaway = get_target_signature_and_modularity_model(repo_dir, error)
 
-        specimin_output = specimin_output_base / str(index + 1) / "orig"
-        min_successful, executed_specimin_cmd = specimin.minimize(error, targets, nullaway, repo_dir, specimin_output)
+            specimin_output = specimin_output_base / str(index + 1) / "orig"
+            min_successful, executed_specimin_cmd = specimin.minimize(
+                error, targets, nullaway, repo_dir, specimin_output
+            )
 
-        if min_successful:
-            print("Minimization successful. Proceeding to refactoring.")
-        else:
-            print("Minimization failed. See failed_minimizations.txt.")
+            if min_successful:
+                print("Minimization successful. Proceeding to refactoring.")
+            else:
+                flog.log_failed_minimization(target.name, checkers[0], index + 1, executed_specimin_cmd)
+                print("Minimization failed. See failed_minimizations.jsonl in the run's log directory.")
+                print(f"<====== Processing of error {index + 1} complete")
+                continue
+
+            checker_cmd = checker_framework.get_command_for_checker(checkers[0], specimin_output)
+            errors_in_minimized = run_checker_and_parse_errors(checker_cmd, specimin_output)
+
+            error_transposed = first((e for e in errors_in_minimized if e.likely_equals(error)), None)
+
+            if any(e.is_compilation_error() for e in errors_in_minimized):
+                flog.log_failed_compilation(target.name, checkers[0], index + 1,
+                                            executed_specimin_cmd, errors_in_minimized)
+                print(
+                    "Minimization failed to produce compilable output. See failed_compilations.jsonl in the run's log directory.")
+                print(f"<====== Processing of error {index + 1} complete")
+                continue
+            elif not errors_in_minimized or not error_transposed:
+                flog.log_failed_preservation(target.name, checkers[0], index + 1,
+                                             executed_specimin_cmd, error, errors_in_minimized)
+                print("Minimization failed to preserve. See failed_preservations.jsonl in the run's log directory.")
+                print(f"<====== Processing of error {index + 1} complete")
+                continue
+
+            other_errors = [e for e in errors_in_minimized if not e.likely_equals(error)]
+
+            agent = RefactorAgent(specimin_output, checkers[0], error_transposed, other_errors)
+            result = agent.run()
+
+            flog.log_refactor_result(target.name, checkers[0], index + 1, result, executed_specimin_cmd)
+
+            flog.log_success(target.name, checkers[0], index + 1)
             print(f"<====== Processing of error {index + 1} complete")
+
+        except Exception as exc:
+            flog.log_crash(scope="error", target_name=target.name, exc=exc,
+                           checker=checkers[0], index=index + 1)
+            print(f"Unhandled exception while processing error {index + 1}: {exc}. See crashes.jsonl. Continuing.")
+            print(f"<====== Processing of error {index + 1} complete (with exception)")
             continue
 
-        checker_cmd = checker_framework.get_command_for_checker(checkers[0], specimin_output)
-        errors_in_minimized = run_checker_and_parse_errors(checker_cmd, specimin_output)
-
-        if any([e.is_compilation_error() for e in errors_in_minimized]):
-            specimin.add_to_failed_compilations(specimin_output / "../", errors_in_minimized, executed_specimin_cmd)
-            print("Minimization failed to produce compilable output. See failed_compilations.txt.")
-            print(f"<====== Processing of error {index + 1} complete")
-            continue
-        elif not errors_in_minimized or not (any([e.likely_equals(error) for e in errors_in_minimized])):
-            specimin.add_to_failed_preservations(specimin_output / "../", error, errors_in_minimized,
-                                                 executed_specimin_cmd)
-            print("Minimization failed to preserve. See failed_preservations.txt.")
-            print(f"<====== Processing of error {index + 1} complete")
-            continue
-
-        other_errors = [e for e in errors_in_minimized if not e.likely_equals(error)]
-
-        # agent = RefactorAgent(specimin_output, checker_cmd, checkers[0], other_errors)
-
-        print(f"<====== Processing of error {index + 1} complete")
+    flog.finish_target(target.name)
 
 
 def main():
@@ -122,12 +152,22 @@ def main():
     specimin.setup()
     checker_framework.setup()
 
+    flog = FailureLogger()
+
     for target in targets:
         print(f"============================ Running for {target.name} ============================")
         print()
-        run(target, checkers)
+
+        try:
+            run(target, checkers, flog)
+        except Exception as exc:
+            flog.log_crash(scope="target", target_name=target.name, exc=exc)
+            print(f"Unhandled exception while running target {target.name}: {exc}. See crashes.jsonl. Continuing.")
+
         print(f"============================ Finished run for {target.name} ============================")
         print()
+
+    flog.finalize()
 
 
 @dataclass

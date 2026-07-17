@@ -10,6 +10,8 @@ _error_parse_regex = re.compile(
 
 _number_regex = re.compile(r"\d+")
 
+_content_regex = re.compile(r"(?P<prefix>.*):\s*(?P<fields>.*)")
+
 
 def run_checker_and_parse_errors(checker_cmd: str, cwd: Path) -> list[CheckerError]:
     result = subprocess.run(
@@ -43,6 +45,14 @@ def read_file_with_numbered_lines(path: Path) -> str:
     return "\n".join(f"{i + 1:d}\t{line}" for i, line in enumerate(lines))
 
 
+def _split_message(message: str) -> tuple[str, set[str] | None]:
+    match = _content_regex.match(message)
+    if not match:
+        return message, None
+
+    return match.group("prefix").strip(), {item.strip() for item in match.group("fields").split(",") if item.strip()}
+
+
 @dataclass
 class CheckerError:
     file_path: str
@@ -55,10 +65,23 @@ class CheckerError:
     def is_compilation_error(self):
         return not self.identifier
 
-    def likely_equals(self, other: CheckerError) -> bool:
+    def likely_equals(self, other: "CheckerError") -> bool:
         if Path(self.file_path).name != Path(other.file_path).name or \
-                self.identifier != other.identifier or self.message != other.message:
+                self.identifier != other.identifier:
             return False
+
+        # Sometimes we see an error like this:
+        #   the constructor does not initialize fields: converter
+        # and then another like this:
+        #   the constructor does not initialize fields: converter, some_other_field
+        # We want to make sure these are treated as equivalent.
+
+        self_template, self_items = _split_message(self.message)
+        other_template, other_items = _split_message(other.message)
+
+        if self_template == other_template and self_items is not None and other_items is not None:
+            if self_items.issubset(other_items) or other_items.issubset(self_items):
+                return True
 
         # Sometimes the same error has its content as a subset of the other's, so we check that
         # We also have things like capture#04 which may change to capture#01 in the Specimin output,

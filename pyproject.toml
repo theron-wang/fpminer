@@ -10,10 +10,12 @@ dependencies = [
     "pydantic-ai>=2.8.0",
     "python-dotenv>=1.2.2",
     "software-analysis-agent",
-    "tree-sitter>=0.26.0",
+    "tree-sitter",
     "tree-sitter-bash>=0.25.1",
     "tree-sitter-java>=0.23.5",
 ]
 
 [tool.uv.sources]
 software-analysis-agent = { git = "https://github.com/islem-esi/software-analysis-agent.git" }
+# must use from GitHub, since the latest release does not include a fix for a segfault we run into a lot
+tree-sitter = { git = "https://github.com/tree-sitter/py-tree-sitter.git" }

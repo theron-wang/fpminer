@@ -67,6 +67,7 @@ class FailureLogger:
             "targets_total": 0,
             "targets_crashed": 0,
             "errors_total": 0,
+            "skipped": 0,
             "failed_minimizations": 0,
             "failed_compilations": 0,
             "failed_preservations": 0,
@@ -165,6 +166,11 @@ class FailureLogger:
     def log_success(self, target_name: str, checker: str, index: int) -> None:
         self._counts["succeeded"] += 1
         self.logger.info("[%s/%s] Error %d: processed successfully.", target_name, checker, index)
+
+    def log_skipped_error(self, target_name: str, targets_fields: list[str], checker: str, index: int):
+        self._counts["skipped"] += 1
+        self.logger.info("[%s/%s] Error %d: skipped (targets fields: %s).", target_name, checker, index,
+                         ", ".join(targets_fields))
 
     # ------------------------------------------------------------------ #
     # final agent output (RefactorAgentRun)

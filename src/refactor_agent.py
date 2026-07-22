@@ -7,6 +7,7 @@ from pathlib import Path
 
 import checker_framework
 from attr import dataclass
+from java_parser import get_method_text_for_signature
 from pydantic_ai import Agent, UsageLimits, RunContext
 from rate_limiter import GLOBAL_MODEL_RATE_LIMITER
 from tenacity import (
@@ -27,7 +28,7 @@ REQUEST_LIMIT = 20
 # Minimum seconds between two run_checker() calls from the *same* agent
 # session. This forces the model to actually batch edits (as the prompt
 # already asks it to) instead of calling run_checker() after every single
-# str_replace, which was one of the biggest sources of wasted requests.
+# `edit_target_method`, which was one of the biggest sources of wasted requests.
 MIN_SECONDS_BETWEEN_CHECKER_RUNS = 8
 
 
@@ -69,11 +70,15 @@ class RefactorAgentRun:
 class RefactorAgent:
     def __init__(self, orig_directory: Path, checker_name: str,
                  error: CheckerError,
-                 errors_to_ignore: list[CheckerError]):
+                 errors_to_ignore: list[CheckerError],
+                 target_method_signature: str,
+                 path_to_full_project: Path):
         self.orig_directory = orig_directory
         self.modified_directory = orig_directory.parent / "modified"
         self.run_checker_cmd = checker_framework.get_command_for_checker(checker_name, self.modified_directory)
         self.checker_name = checker_name.split('.')[-1]
+        self.target_method_signature = target_method_signature
+        self.path_to_full_project = path_to_full_project
 
         if os.path.exists(self.modified_directory):
             shutil.rmtree(self.modified_directory)
@@ -119,7 +124,7 @@ class RefactorAgent:
             success is true only if the build produced zero errors.
 
             IMPORTANT - this is comparatively expensive. Do not call it after
-            every individual edit. Batch several related str_replace calls
+            every individual edit. Batch several related `edit_target_method` calls
             together first, then call this once to check the whole batch.
             If you call this again too soon after a previous call, it will
             be rejected without running the checker.
@@ -162,12 +167,12 @@ class RefactorAgent:
             """View the current contents of a file in the modified directory,
             with line numbers prefixed followed by a tab (i.e., '12\tsome code').
             Line numbers are for your reference only - do NOT include them
-            when constructing old_str for str_replace.
+            when constructing old_str for `edit_target_method`.
 
             You already have the full numbered contents of every file from
-            the initial prompt, and str_replace's success response includes
+            the initial prompt, and `edit_target_method`'s success response includes
             fresh context around each edit you make. Only call this if a
-            str_replace call failed (old_str not found / not unique) and you
+            `edit_target_method` call failed (old_str not found / not unique) and you
             need to re-sync on a file's true current contents - do not call
             it routinely before edits you're already confident about.
             """
@@ -183,16 +188,16 @@ class RefactorAgent:
             return numbered
 
         @self.agent.tool
-        def str_replace(ctx: RunContext[None], relative_path: str, old_str: str, new_str: str) -> str:
-            """Replace an exact block of text in a file with new text.
+        def edit_target_method(ctx: RunContext[None], old_str: str, new_str: str) -> str:
+            """Replace an exact block of text in the target method with new text.
 
-            old_str must match the file's raw content EXACTLY (no line number
-            prefixes, exact whitespace) and must appear exactly once in the
-            file. If it appears zero times or more than once, the edit is
-            rejected and no changes are made - in that case, call view_file
-            to get fresh content and widen old_str with a bit more
-            surrounding context (i.e., an extra line above/below) until it is
-            unique.
+            old_str must match a part of the target method's raw content EXACTLY
+            (no line number prefixes, exact whitespace) and must appear exactly once
+            in the target method. If it appears zero times or more than once, the edit is
+            rejected and no changes are made - in that case, the error message will
+            contain the updated method content which you should use. Then, widen old_str
+            with a bit more surrounding context (i.e., an extra line above/below) until
+            it is unique.
 
             Returns a JSON string:
               {"success": bool, "message": str}
@@ -203,28 +208,24 @@ class RefactorAgent:
             """
             GLOBAL_MODEL_RATE_LIMITER.acquire()
 
-            path = (self.modified_directory / relative_path).resolve()
-            if not str(path).startswith(str(self.modified_directory.resolve())):
-                return json.dumps({
-                    "success": False,
-                    "message": f"path escapes modified directory: {relative_path}",
-                })
-            if not path.exists():
-                return json.dumps({
-                    "success": False,
-                    "message": f"file not found: {relative_path}",
-                })
-
-            content = path.read_text()
+            path_to_workspace_copy = Path(self.error_to_fix.file_path).resolve()
+            rel_path = path_to_workspace_copy.relative_to(self.modified_directory)
+            content = get_method_text_for_signature(self.path_to_full_project, rel_path, self.target_method_signature)
+            assert content is not None
             count = content.count(old_str)
 
             if count == 0:
                 return json.dumps({
                     "success": False,
                     "message": (
-                        "old_str not found in file. The file may have changed "
-                        "since you last viewed it, or whitespace doesn't match "
-                        "exactly. Call view_file again and copy old_str precisely."
+                        "old_str not found in the target method. Its contents may have "
+                        "changed since you last viewed it, or whitespace doesn't match "
+                        "exactly."
+                        "\n\n"
+                        f"`{self.target_method_signature}`:"
+                        "```java"
+                        f"{content}"
+                        "```"
                     ),
                 })
             if count > 1:
@@ -237,11 +238,15 @@ class RefactorAgent:
                     ),
                 })
 
-            new_content = content.replace(old_str, new_str, 1)
-            path.write_text(new_content)
+            new_method_content = content.replace(old_str, new_str)
+
+            file_content = path_to_workspace_copy.read_text()
+            new_file_content = file_content.replace(content, new_method_content, 1)
+
+            path_to_workspace_copy.write_text(new_file_content)
 
             # Build a small context window around the edit for confirmation.
-            new_lines = new_content.splitlines()
+            new_lines = new_file_content.splitlines()
             replaced_start = content[:content.index(old_str)].count("\n")
             ctx_start = max(0, replaced_start - 2)
             ctx_end = min(len(new_lines), replaced_start + new_str.count("\n") + 3)
@@ -337,7 +342,7 @@ class RefactorAgent:
                     "message": (
                         f"Checker still reports {len(errors)} error(s). The session "
                         "is NOT complete. Review the errors below, make further "
-                        "edits with str_replace, and call finish() again once "
+                        "edits with `edit_target_method`, and call finish() again once "
                         "resolved."
                     ),
                 })
@@ -363,7 +368,6 @@ class RefactorAgent:
         try:
             self._run_sync_with_rate_limit_retry(initial_prompt)
         except Exception as e:
-            # TODO: handle 503
             result.error = f"Agent run failed or exhausted limits: {e}"
             return result
 
@@ -440,6 +444,8 @@ Semantically equivalent means, at minimum:
 - No change to public method signatures' behavior as observed by callers
   (return values, thrown exceptions, side effects) for any input that was
   previously valid.
+- No change to initializer values. That is, a variable or field previously
+  set to a specific value (like null) should stay that value.
 - Absolutely no suppression of the error via @SuppressWarnings. A suppression
   is not a fix, it's hiding the question.
 - No deletion of the logic that produces the warning in order to make the
@@ -454,10 +460,6 @@ trigger this checker. You must leave it alone - it is out of scope for
 this task even if it looks like an easy fix. `run_checker` accounts for
 these cases, so you can always trust its output.
 
-You will also notice that most definitions have been stubbed out. This is
-by design. You should not modify those stubs, and you should keep your edits
-to the target, non-stub method unless a change must be made elsewhere.
-
 If, after investigating, you determine there is NO refactor that both (a)
 fixes the error and (b) preserves semantic equivalence - for example, the
 error reflects a genuine possible null dereference that the original code
@@ -466,9 +468,20 @@ behavior on some input - do not force a fix. Call `not_possible` with an
 explanation of why. Do not attempt to disguise a behavior change as a
 "fix" merely to make the checker pass.
 
+## Making code edits
+
+You will notice that most definitions have been stubbed out. This is
+by design. There will be one non-stubbed method - **the target method** -
+which is the method (or constructor) that contains the error. This is the
+ONLY code which you can change. You may not change any other method, constructor,
+type, or field in the project provided to you. The target method's signature is as
+follows:
+
+{self.target_method_signature}
+
 ## Files in the project
 The line numbers shown below are for your reference only - do NOT include
-them when constructing old_str for `str_replace`. All paths are relative to
+them when constructing old_str for `edit_target_method`. All paths are relative to
 the project root. You already have the full current contents of every file
 right here - do not call `view_file` for a file you haven't edited yet.
 In your edits, you may assume that the Checker Framework is on the classpath.
@@ -476,17 +489,18 @@ In your edits, you may assume that the Checker Framework is on the classpath.
 {files_section}
 
 ## How to work
-1. For the given error, make the smallest edit that fixes it using `str_replace`.
-   Calling `str_replace` with your edit MUST be your FIRST action, since you have
+1. For the given error, make the smallest edit that fixes it using `edit_target_method`.
+   Calling `edit_target_method` with your edit MUST be your FIRST action, since you have
    already been given the error you need to fix, alongside the files in this
    project. You shall not call `view_file` or `run_checker` before trying
-   `str_replace` at least once. Trust the numbered file contents above as ground
+   `edit_target_method` at least once. Trust the numbered file contents above as ground
    truth until you have edited a file yourself. If old_str is rejected as not
-   found or not unique, THEN call `view_file` on that specific file to get fresh
-   content before retrying.
+   found or not unique, you will get the contents of the target method; treat that
+   as fact and use it to make your edit. Recall that you may only edit code
+   in the target method.
 2. Batch several related edits together before calling `run_checker` -
    it's comparatively expensive, so don't call it after every single
-   `str_replace`. Only call it once you believe you've made all the edits
+   `edit_target_method`. Only call it once you believe you've made all the edits
    needed for this batch. Ensure that you do not introduce additional
    Checker Framework errors/warnings and that you do not cause the code
    to be uncompilable.
@@ -497,6 +511,6 @@ In your edits, you may assume that the Checker Framework is on the classpath.
    called a limited number of times, so don't call it speculatively.
 4. Do not guess at file contents from memory beyond what's shown above.
    Every edit must be based on content you have actually seen in this
-   session - the listing above, a `view_file` call, or a `str_replace`
+   session - the listing above, a `view_file` call, or a `edit_target_method`
    confirmation.
 """

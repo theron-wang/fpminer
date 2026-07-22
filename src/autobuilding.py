@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import tarfile
 from pathlib import Path
@@ -12,7 +13,7 @@ import tree_sitter_bash
 from analysis_agent.mini_orchestrator import sanitize_for_filename, run_with_attempts
 from analysis_agent.replay_producer import produce_replay
 from checker_framework import get_path_to_checker_jar, get_path_to_checker_dir, get_path_to_dljc, get_javac_path
-from minisweagent.environments.docker import DockerEnvironment
+from minisweagent.environments.local import LocalEnvironment
 from minisweagent.models.litellm_model import LitellmModel
 from tree_sitter import Language, Parser
 from utils import run_checker_and_parse_errors
@@ -35,13 +36,21 @@ DLJC_BUILD_COMMANDS = [
 # gemini/gemini-2.5-flash-lite
 # gemini/gemini-3.1-flash-lite
 
-def enable_checkers(target_name: str, target_url: str, tool_name: str, tool_url: str) -> tuple[bool, str]:
+def enable_checkers(target_name: str, target_url: str, tool_name: str, tool_url: str) -> tuple[bool, str | None]:
     print(f"Running do-like-javac on {target_name} with tool {tool_name}")
+
+    already_existed = os.path.exists(f"targets/{target_name}")
+
     cmd_from_dljc = _try_do_like_javac(target_name, target_url, tool_name)
 
     if cmd_from_dljc:
         print("do-like-javac successful. Skipping AnalysisAgent.")
         return True, cmd_from_dljc
+
+    return False
+
+    if not already_existed:
+        shutil.rmtree(f"targets/{target_name}")
 
     success = True
 
@@ -51,8 +60,8 @@ def enable_checkers(target_name: str, target_url: str, tool_name: str, tool_url:
         print(f"Target {target_name} already exists, skipping")
     else:
         model = LitellmModel(model_name=os.environ["EXEC_AGENT_MODEL"])
-        env = DockerEnvironment(
-            image="ubuntu:22.04"
+        env = LocalEnvironment(
+            cwd="analysis_agent_workspace",
         )
 
         success, message = run_with_attempts(

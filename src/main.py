@@ -3,24 +3,22 @@ from __future__ import annotations
 import faulthandler
 import json
 import os
-import shutil
 from dataclasses import dataclass
-from pathlib import Path
 
 import argparse
 import checker_framework
+import differential_tester
 import dotenv
 import specimin
-from autobuilding import enable_checkers
+from differential_tester import DifferentialTester
 from java_parser import get_target_signature_and_modularity_model
 from logger import FailureLogger
 from more_itertools import first
 from refactor_agent import RefactorAgent
-from utils import run_checker_and_parse_errors, run_git_reset_hard, run_git_commit, replace_in_head_commit
+from target_project import TargetProject
+from utils import run_checker_and_parse_errors
 
 faulthandler.enable()
-
-checker_framework_url = "https://github.com/typetools/checker-framework/"
 
 
 def ensure_posix_and_docker():
@@ -39,33 +37,22 @@ def ensure_posix_and_docker():
 def run(target: Target, checkers: list[str], flog: FailureLogger):
     flog.start_target(target.name)
 
-    success, command = enable_checkers(target.name, target.url, checkers[0], checker_framework_url)
-
-    base_repo_dir = Path(f"targets/{target.name}")
-
-    if not success:
-        flog.logger.error("Failed to enable checkers for %s", target.name)
+    try:
+        project = TargetProject(target.name, target.url)
+    except ValueError as exc:
+        flog.logger.error("Failed to enable checkers for %s: %s", target.name, exc)
         print(f"Failed to enable checkers for {target.name}")
         return
 
-    # Commit set-up repo so we don't undo these changes in git resets later
-    run_git_commit(base_repo_dir)
-
-    last_checker = None
+    project.enable_checker(checkers[0])
+    jar_path = project.compile_jar()
+    diff_tester = DifferentialTester(jar_path, project.base_dir, target.name)
 
     for checker in checkers:
-        workspace_root = Path(f"workspace/{target.name}/{checker}")
-        repo_dir = workspace_root / target.name
-
-        shutil.copytree(base_repo_dir, repo_dir, dirs_exist_ok=True)
-        if last_checker is not None:
-            command = command.replace(last_checker, checker)
-            replace_in_head_commit(search=last_checker, replace=checker, repo=repo_dir)
+        repo_dir, command = project.checkout_workspace(checker, checkers[0])
 
         errors = run_checker_and_parse_errors(command, repo_dir)
-
-        workspace_root = Path(f"workspace/{target.name}/{checker}")
-        os.makedirs(workspace_root, exist_ok=True)
+        workspace_root = repo_dir.parent
 
         for index, error in enumerate(errors):
             print()
@@ -116,10 +103,13 @@ def run(target: Target, checkers: list[str], flog: FailureLogger):
 
                 other_errors = [e for e in errors_in_minimized if not e.likely_equals(error)]
 
-                agent = RefactorAgent(specimin_output, checker, error_transposed, other_errors, targets[0], repo_dir)
-                result = agent.run()
+                agent = RefactorAgent(specimin_output, checker, error_transposed, other_errors, targets[0], repo_dir,
+                                      diff_tester)
+                # result = agent.run()
 
-                flog.log_refactor_result(target.name, checker, index + 1, result, executed_specimin_cmd)
+                diff_tester.run(agent.diff_testing_dir)
+
+                # flog.log_refactor_result(target.name, checker, index + 1, result, executed_specimin_cmd)
 
                 flog.log_success(target.name, checker, index + 1)
                 print(f"<====== Processing of error {index + 1} complete")
@@ -130,12 +120,6 @@ def run(target: Target, checkers: list[str], flog: FailureLogger):
                 print(f"Unhandled exception while processing error {index + 1}: {exc}. See crashes.jsonl. Continuing.")
                 print(f"<====== Processing of error {index + 1} complete (with exception)")
                 continue
-
-            finally:
-                # Run git reset --hard to undo any changes made to `repo_dir` when handling this error
-                run_git_reset_hard(repo_dir)
-
-        last_checker = checker
 
     flog.finish_target(target.name)
 
@@ -170,14 +154,15 @@ def main():
         checkers = [line.strip() for line in f.readlines()]
 
     with open(args.targets) as f:
-        targets = [Target(**json.loads(line)) for line in f]
+        targets = [Target(**json.loads(line)) for line in f if not line.startswith("//")]
 
     dotenv.load_dotenv()
 
-    # AnalysisAgent requires the unix shell
+    # AnalysisAgent requires the unix shell + docker
     ensure_posix_and_docker()
     specimin.setup()
     checker_framework.setup()
+    differential_tester.setup()
 
     flog = FailureLogger()
 

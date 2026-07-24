@@ -7,6 +7,7 @@ from pathlib import Path
 
 import checker_framework
 from attr import dataclass
+from differential_tester import DifferentialTester
 from java_parser import get_method_text_for_signature
 from pydantic_ai import Agent, UsageLimits, RunContext
 from rate_limiter import GLOBAL_MODEL_RATE_LIMITER
@@ -18,7 +19,7 @@ from tenacity import (
     before_sleep_log,
 )
 from utils import read_file_with_numbered_lines, CheckerError, \
-    run_checker_and_parse_errors
+    run_checker_and_parse_errors, find_source_dir
 
 logger = logging.getLogger(__name__)
 
@@ -72,18 +73,22 @@ class RefactorAgent:
                  error: CheckerError,
                  errors_to_ignore: list[CheckerError],
                  target_method_signature: str,
-                 path_to_full_project: Path):
+                 path_to_full_project: Path,
+                 differential_tester: DifferentialTester):
         self.orig_directory = orig_directory
         self.modified_directory = orig_directory.parent / "modified"
+        self.diff_testing_dir = orig_directory.parent / "diff_testing"
+        self.differential_tester = differential_tester
+
         self.run_checker_cmd = checker_framework.get_command_for_checker(checker_name, self.modified_directory)
         self.checker_name = checker_name.split('.')[-1]
         self.target_method_signature = target_method_signature
         self.path_to_full_project = path_to_full_project
 
-        if os.path.exists(self.modified_directory):
-            shutil.rmtree(self.modified_directory)
-
-        shutil.copytree(str(self.orig_directory), self.modified_directory)
+        # if os.path.exists(self.modified_directory):
+        #     shutil.rmtree(self.modified_directory)
+        #
+        # shutil.copytree(str(self.orig_directory), self.modified_directory)
 
         error.file_path = error.file_path.replace(str(orig_directory), str(self.modified_directory))
         error.raw = error.raw.replace(str(orig_directory), str(self.modified_directory))
@@ -94,6 +99,20 @@ class RefactorAgent:
 
         self.error_to_fix = error
         self.errors_to_ignore = errors_to_ignore
+
+        # The mirror copy is the target file's original content from the original repository, not
+        # from the Speciminified output
+        rel_path = Path(self.error_to_fix.file_path).resolve().relative_to(self.modified_directory.resolve())
+        self.mirror_copy_for_differential_testing = (
+                self.diff_testing_dir / rel_path).resolve()
+
+        os.makedirs(self.mirror_copy_for_differential_testing.parent, exist_ok=True)
+
+        full_project_src_dir = find_source_dir(path_to_full_project, rel_path)
+
+        assert full_project_src_dir is not None
+
+        shutil.copy(full_project_src_dir / rel_path, self.mirror_copy_for_differential_testing)
 
         self.agent = Agent(
             os.environ["REFACTOR_AGENT_MODEL"]
@@ -163,6 +182,37 @@ class RefactorAgent:
             return json.dumps(payload)
 
         @self.agent.tool
+        def check_semantic_equivalence(ctx: RunContext[None]) -> str:
+            """Run full differential testing to verify your edit preserves semantic
+            equivalence with the original code.
+
+            This is EXTREMELY EXPENSIVE - it is orders of magnitude more costly than
+            `run_checker` or `edit_target_method`, since it runs a differential fuzzer.
+            Do not call this speculatively, experimentally, or as a substitute for reasoning
+            through your edit yourself.
+
+            Only call this once, after you have:
+              1. Made the edit(s) you believe fix the checker error.
+              2. Confirmed via `run_checker` that the checker now passes.
+              3. Manually reviewed your diff and convinced yourself it is a real
+                 code-level change (not an annotation-only change) that preserves
+                 behavior for all previously-valid inputs.
+
+            This is a final verification step, not a search tool - you should already
+            be confident the edit is correct before calling it. Calling it multiple
+            times per error, or calling it before `run_checker` has confirmed the
+            checker passes, wastes a very large amount of compute and is HIGHLY
+            DISCOURAGED except when genuinely necessary to resolve ambiguity you
+            cannot otherwise resolve.
+
+            Returns a JSON string:
+              {"success": bool, "message": str}
+            """
+            GLOBAL_MODEL_RATE_LIMITER.acquire()
+
+            return json.dumps(self._run_differential_testing())
+
+        @self.agent.tool
         def view_file(ctx: RunContext[None], relative_path: str) -> str:
             """View the current contents of a file in the modified directory,
             with line numbers prefixed followed by a tab (i.e., '12\tsome code').
@@ -181,6 +231,26 @@ class RefactorAgent:
             path = (self.modified_directory / relative_path).resolve()
             if not str(path).startswith(str(self.modified_directory.resolve())):
                 return f"Error: path escapes modified directory: {relative_path}"
+            if not path.exists():
+                return f"Error: file not found: {relative_path}"
+
+            numbered = read_file_with_numbered_lines(path)
+            return numbered
+
+        @self.agent.tool
+        def view_original_file(ctx: RunContext[None], relative_path: str) -> str:
+            """View the original contents of a file in the original directory,
+            with line numbers prefixed followed by a tab (i.e., '12\tsome code').
+            Line numbers are for your reference only.
+
+            You should only call this if the semantic-equivalence checker fails,
+            and you need to refresh your memory on the original method.
+            """
+            GLOBAL_MODEL_RATE_LIMITER.acquire()
+
+            path = (self.orig_directory / relative_path).resolve()
+            if not str(path).startswith(str(self.orig_directory.resolve())):
+                return f"Error: path escapes original directory: {relative_path}"
             if not path.exists():
                 return f"Error: file not found: {relative_path}"
 
@@ -208,9 +278,9 @@ class RefactorAgent:
             """
             GLOBAL_MODEL_RATE_LIMITER.acquire()
 
-            path_to_workspace_copy = Path(self.error_to_fix.file_path).resolve()
-            rel_path = path_to_workspace_copy.relative_to(self.modified_directory)
-            content = get_method_text_for_signature(self.path_to_full_project, rel_path, self.target_method_signature)
+            path_to_workspace_copy = Path(self.error_to_fix.file_path)
+
+            content = get_method_text_for_signature(path_to_workspace_copy, self.target_method_signature)
             assert content is not None
             count = content.count(old_str)
 
@@ -254,6 +324,11 @@ class RefactorAgent:
                 f"{i + 1:d}\t{new_lines[i]}" for i in range(ctx_start, ctx_end)
             )
 
+            # Now, update the mirror copy for when the agent needs to call the diff tester
+            file_content = self.mirror_copy_for_differential_testing.read_text()
+            new_file_content = file_content.replace(content, new_method_content, 1)
+            self.mirror_copy_for_differential_testing.write_text(new_file_content)
+
             return json.dumps({
                 "success": True,
                 "message": f"Edit applied. Context around the change:\n{context}",
@@ -294,9 +369,11 @@ class RefactorAgent:
         @self.agent.tool
         def finish(ctx: RunContext[None]) -> str:
             """Call this ONLY when you are confident your assigned target error is
-            resolved. This re-runs the checker and verifies specifically that
-            your target error is gone - other pre-existing errors elsewhere in
-            the codebase do not block this from succeeding.
+            resolved. This re-runs the checker to verify specifically that
+            your target error is gone, and that additional bugs were not introduced.
+            However, other pre-existing errors elsewhere in the codebase do not block
+            this from succeeding. This will also run the semantic-equivalence checker
+            to ensure that your edit preserves the original method's behavior.
 
             If your target error is still present, the session will NOT end and
             you should keep working. However, finish() may only be called a
@@ -411,6 +488,9 @@ class RefactorAgent:
 
         return errors
 
+    def _run_differential_testing(self) -> str:
+        pass
+
     def _build_initial_prompt(self) -> str:
         """
         Builds the initial prompt for the agent, including the task description,
@@ -439,6 +519,16 @@ Your job is to refactor the code so that:
 2. The refactor is semantically equivalent to the original code - it must
    preserve the exact same runtime behavior for all valid inputs. You are
    fixing a *type-checking* problem, not changing what the program does.
+3. The fix must be an actual code change, not an annotation-only change.
+   Adding, removing, or moving a type annotation - with no other
+   change to the surrounding code - is NOT an acceptable fix, even if it
+   makes the checker pass. Annotations describe the code; they are not
+   themselves a semantics-preserving code change, and this task is
+   specifically about finding a code-level refactor. If the only way you
+   can find to satisfy the checker is to add/remove/relocate an annotation
+   with the logic otherwise untouched, treat that the same as having no
+   fix: call `not_possible` and explain that the only fix you found was
+   annotation-only.
 
 Semantically equivalent means, at minimum:
 - No change to public method signatures' behavior as observed by callers
@@ -465,8 +555,12 @@ fixes the error and (b) preserves semantic equivalence - for example, the
 error reflects a genuine possible null dereference that the original code
 never actually guarded against, and any real fix would necessarily change
 behavior on some input - do not force a fix. Call `not_possible` with an
-explanation of why. Do not attempt to disguise a behavior change as a
-"fix" merely to make the checker pass.
+explanation of why. Likewise, if the only way you can make the checker pass
+is by changing annotations alone with no accompanying code change, that
+also counts as no fix being possible - call `not_possible` rather than
+submitting an annotation-only edit. Do not attempt to disguise a behavior
+change, or a bare annotation change, as a "fix" merely to make the checker
+pass.
 
 ## Making code edits
 
@@ -504,12 +598,23 @@ In your edits, you may assume that the Checker Framework is on the classpath.
    needed for this batch. Ensure that you do not introduce additional
    Checker Framework errors/warnings and that you do not cause the code
    to be uncompilable.
-3. Once you believe all errors are resolved, call `finish`. `finish`
+3. Before calling `run_checker` or `finish`, check your diff against the
+   target method: if the only lines that changed are annotations (nothing
+   about control flow, expressions, assignments, or structure), that is not
+   a valid fix - revert to a real code-level approach or call `not_possible`.
+4. Once you believe all errors are resolved, call `finish`. `finish`
    re-runs the checker itself - if errors remain, you'll get them back and
    must keep working. Do not call `finish` until you have already confirmed
    via `run_checker` that you expect it to pass. `finish` may only be
    called a limited number of times, so don't call it speculatively.
-4. Do not guess at file contents from memory beyond what's shown above.
+5. If `finish` requests that you try again because your refactor is not
+   semantically equivalent, you may call `check_semantic_equivalence` once
+   you are ABSOLUTELY CERTAIN your edits pass the checker and preserve
+   semantic equivalence. `check_semantic_equivalence` is extremely expensive,
+   so you should call it very sparingly. You should check the original file
+   contents with `view_original_file` if you are unsure what the old method
+   definition was.
+5. Do not guess at file contents from memory beyond what's shown above.
    Every edit must be based on content you have actually seen in this
    session - the listing above, a `view_file` call, or a `edit_target_method`
    confirmation.

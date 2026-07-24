@@ -151,7 +151,7 @@ def _iter_declaration_nodes(node: Node):
         yield from _iter_declaration_nodes(child)
 
 
-def get_method_text_for_signature(root_dir: Path, file_path: Path, target_signature: str) -> str | None:
+def get_method_text_for_signature(file_path: Path, target_signature: str) -> str | None:
     """
     Given a file and a target signature (matching the format produced by
     get_target_signature_and_modularity_model - e.g.
@@ -159,8 +159,7 @@ def get_method_text_for_signature(root_dir: Path, file_path: Path, target_signat
     "com.example.Foo#baz" for a field), returns the exact source text of that
     declaration.
 
-    :param root_dir: root directory that file_path is relative to
-    :param file_path: path (relative to root_dir) of the Java file to search
+    :param file_path: path of the Java file to search
     :param target_signature: the signature string to match against
     :return: the raw source text of the matching declaration (the entire
         method_declaration / constructor_declaration / field_declaration
@@ -170,7 +169,7 @@ def get_method_text_for_signature(root_dir: Path, file_path: Path, target_signat
     java = Language(tree_sitter_java.language())
     parser = Parser(java)
 
-    with open(root_dir / file_path, 'rb') as f:
+    with open(file_path, 'rb') as f:
         source = f.read()
 
     tree = parser.parse(source)

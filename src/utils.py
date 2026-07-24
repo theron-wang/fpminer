@@ -1,6 +1,7 @@
 import os
 import re
 import subprocess
+from collections import deque
 from pathlib import Path
 
 from attr import dataclass
@@ -58,75 +59,88 @@ def run_git_reset_hard(directory: Path):
     subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=directory)
 
 
-def run_git_commit(directory: Path):
-    subprocess.run(["git", "commit", "-am", "Automated commit"], cwd=directory)
-
-
-def replace_in_head_commit(search: str, replace: str, repo: Path = Path(".")) -> str:
+def replace_in_uncommitted_changes(search: str, replace: str, repo: Path = Path(".")):
     """
-    Rewrite the current HEAD commit in place: undo it, apply a literal
-    find-and-replace to the files it touched, and recommit with the same
-    message in its place.
+    Apply a literal find-and-replace to every file with uncommitted changes
+    (staged or unstaged) relative to HEAD.
 
-    HISTORY-REWRITING - HEAD gets a new sha. Only use this before pushing,
-    or before anyone else has based work on the current HEAD.
+    Only touches the working tree - nothing is committed, and no history
+    is rewritten. Safe to use at any point, including on shared/pushed
+    branches.
 
     :param search: literal substring to find (not a regex)
     :param replace: literal substring to replace it with
     :param repo: path to the git repository (default: cwd)
-    :raises RuntimeError: on a dirty working tree, HEAD being the repo's
-        root commit (no parent to reset onto), or if nothing matched and
-        empty_ok is False. On any failure, no reset/commit is left
-        half-done - either the whole rewrite succeeds or HEAD is restored
-        to its original commit before raising.
     """
 
     def _run(args, check=True):
         return subprocess.run(args, cwd=repo, check=check, text=True, capture_output=True)
 
-    if _run(["git", "status", "--porcelain"]).stdout.strip():
-        raise RuntimeError("working tree is not clean; commit or stash first")
-
-    commit_sha = _run(["git", "rev-parse", "HEAD"]).stdout.strip()
-
-    parent = _run(["git", "rev-parse", "HEAD^"], check=False)
-    if parent.returncode != 0:
-        raise RuntimeError(
-            "HEAD has no parent (it's the repo's root commit) - "
-            "can't reset onto a parent that doesn't exist"
-        )
-    parent_sha = parent.stdout.strip()
-
     changed_files = _run(
-        ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", commit_sha]
+        ["git", "diff", "--name-only", "HEAD"]
     ).stdout.splitlines()
-    if not changed_files:
-        raise RuntimeError(f"{commit_sha} doesn't change any files")
 
-    # Undo the commit but leave its changes staged, ready to be edited
-    # and recommitted.
-    _run(["git", "reset", "--soft", parent_sha])
+    for rel_path in changed_files:
+        full_path = os.path.join(repo, rel_path)
+        if not os.path.isfile(full_path):
+            continue  # file was deleted in the uncommitted changes
+        with open(full_path, "r", encoding="utf-8", errors="surrogateescape") as f:
+            content = f.read()
+        if search not in content:
+            continue
+        with open(full_path, "w", encoding="utf-8", errors="surrogateescape") as f:
+            f.write(content.replace(search, replace))
 
-    try:
-        for rel_path in changed_files:
-            full_path = os.path.join(repo, rel_path)
-            if not os.path.isfile(full_path):
-                continue  # file was deleted by this commit
-            with open(full_path, "r", encoding="utf-8", errors="surrogateescape") as f:
-                content = f.read()
-            if search not in content:
-                continue
-            with open(full_path, "w", encoding="utf-8", errors="surrogateescape") as f:
-                f.write(content.replace(search, replace))
-            _run(["git", "add", "--", rel_path])
 
-        # Reuse the original commit's message (and author/date) verbatim.
-        _run(["git", "commit", "-C", commit_sha])
-    except Exception:
-        # Restore HEAD to exactly where it was before we touched anything,
-        # since a half-applied reset is worse than a clean failure.
-        _run(["git", "reset", "--hard", commit_sha], check=False)
-        raise
+def find_build_system_file(base_dir: Path) -> Path | None:
+    """
+    Detects the build system file in a folder. Breadth-first search for
+    either build.gradle(.kts) or pom.xml, and returns None if
+    neither was found.
+    :param base_dir: The base directory
+    :return: "maven", "gradle", or None
+    """
+    queue = deque[Path]([base_dir])
+    ignored = {".git", "target", "build", ".gradle"}
+
+    while queue:
+        current = queue.popleft()
+
+        for path in current.iterdir():
+            if path.is_file() and path.name in ("pom.xml", "build.gradle", "build.gradle.kts"):
+                return path
+            elif path.is_dir() and path.name not in ignored:
+                queue.append(path)
+
+    return None
+
+
+def find_source_dir(path_to_full_project: Path, rel_path: Path) -> Path | None:
+    """
+    BFS under path_to_full_project for the first directory `d` such that
+    d / rel_path exists as a file. Returns that directory
+    (the "source directory"), or None if not found.
+    """
+    queue = deque([path_to_full_project])
+
+    while queue:
+        current_dir = queue.popleft()
+
+        candidate = current_dir / rel_path
+        if os.path.isfile(candidate):
+            return current_dir
+
+        try:
+            entries = sorted(os.listdir(current_dir))
+        except (PermissionError, FileNotFoundError):
+            continue
+
+        for entry in entries:
+            full_path = current_dir / entry
+            if os.path.isdir(full_path):
+                queue.append(full_path)
+
+    return None
 
 
 @dataclass

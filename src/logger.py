@@ -18,19 +18,6 @@ def _timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def _is_compilation_error(error: Any) -> bool:
-    """Best-effort check for CheckerError.is_compilation_error(), without a
-    hard import dependency on the `utils` module (keeps this logger reusable
-    on its own)."""
-    checker = getattr(error, "is_compilation_error", None)
-    if callable(checker):
-        try:
-            return bool(checker())
-        except Exception:
-            return False
-    return False
-
-
 class FailureLogger:
     """
     Centralized, file-based logger for the false-positives-miner pipeline.
@@ -186,10 +173,6 @@ class FailureLogger:
         """Records the final output of RefactorAgent.run(error) for a given
         error — i.e. a `RefactorAgentRun`-shaped object with `success`,
         `possible`, `error`, and `not_possible_reason` fields.
-
-        Duck-typed (via getattr) rather than importing RefactorAgentRun
-        directly, so this module has no dependency on wherever that class
-        lives and works with any object exposing the same attributes.
 
         Written to:
           - refactor_results.jsonl  one record per error (machine-readable)

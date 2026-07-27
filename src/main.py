@@ -44,20 +44,18 @@ def run(target: Target, checkers: list[str], flog: FailureLogger):
         print(f"Failed to enable checkers for {target.name}")
         return
 
-    project.enable_checker(checkers[0])
     jar_path = project.compile_jar()
     diff_tester = DifferentialTester(jar_path, project.base_dir, target.name)
 
     for checker in checkers:
-        repo_dir, command = project.checkout_workspace(checker, checkers[0])
+        repo_dir = project.checkout_workspace(checker, checkers[0])
 
-        errors = run_checker_and_parse_errors(command, repo_dir)
         workspace_root = repo_dir.parent
 
-        for index, error in enumerate(errors):
+        for index, error in enumerate(project.errors):
             print()
-            print(f"Beginning processing of error {index + 1} / {len(errors)} ======>")
-            flog.log_error_start(target.name, checker, index + 1, len(errors))
+            print(f"Beginning processing of error {index + 1} / {len(project.errors)} ======>")
+            flog.log_error_start(target.name, checker, index + 1, len(project.errors))
 
             try:
                 targets, nullaway = get_target_signature_and_modularity_model(repo_dir, error)

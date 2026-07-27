@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 from checker_framework import get_path_to_checker_jar, get_path_to_checker_dir, get_path_to_dljc, get_javac_path
-from utils import run_checker_and_parse_errors
+from utils import run_checker_and_parse_errors, CheckerError
 
 LOGS_ROOT = Path("analysis_agent_logs")
 
@@ -15,7 +15,7 @@ DLJC_BUILD_COMMANDS = [
 ]
 
 
-def run_dljc(target_name: str, target_url: str, tool_name: str) -> str | None:
+def run_dljc(target_name: str, target_url: str, tool_name: str) -> list[CheckerError]:
     if os.path.exists(f"targets/{target_name}"):
         print(f"Target {target_name} already exists, skipping cloning")
     else:
@@ -44,9 +44,9 @@ def run_dljc(target_name: str, target_url: str, tool_name: str) -> str | None:
         errors = run_checker_and_parse_errors(output_cmd, Path(f"targets/{target_name}"))
 
         if errors:
-            return output_cmd
+            return errors
 
-    return None
+    return []
 
 
 def _run_dljc_print(dljc_cmd: str, cwd: str) -> list[dict] | None:

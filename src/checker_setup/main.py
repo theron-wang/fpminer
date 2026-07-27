@@ -3,14 +3,15 @@ import shutil
 
 from checker_setup.analysisagent import run_analysis_agent
 from checker_setup.dljc import run_dljc
+from utils import CheckerError
 
 CF_URL = "https://github.com/typetools/checker-framework/"
 
 
-def setup_checker(target_name: str, target_url: str, tool_name: str) -> str | None:
+def setup_checker(target_name: str, target_url: str, tool_name: str) -> list[CheckerError] | None:
     """
     Sets up the given checker on the given target. Runs DLJC first; if that fails, then
-    try AnalysisAgent. Returns the command to run the checker, or None if all failed.
+    try AnalysisAgent. Returns the errors generated, or None if all failed.
 
     :param target_name: The target name
     :param target_url: The url to the target's repository
@@ -21,11 +22,11 @@ def setup_checker(target_name: str, target_url: str, tool_name: str) -> str | No
 
     already_existed = os.path.exists(f"targets/{target_name}")
 
-    command = run_dljc(target_name, target_url, tool_name)
+    errors = run_dljc(target_name, target_url, tool_name)
 
-    if command:
+    if errors:
         print(f"DLJC succeeded for target {target_name} with tool {tool_name}")
-        return command
+        return errors
 
     # dljc.py automatically clones the project. If the repository was already cloned before
     # the dljc run, and dljc failed, that means that it is the artifact of a previous
@@ -35,11 +36,11 @@ def setup_checker(target_name: str, target_url: str, tool_name: str) -> str | No
 
     print(f"DLJC failed for target {target_name} with tool {tool_name}, trying AnalysisAgent")
 
-    success, command = run_analysis_agent(target_name, target_url, tool_name, CF_URL)
+    errors = run_analysis_agent(target_name, target_url, tool_name, CF_URL)
 
-    if success:
+    if errors:
         print(f"AnalysisAgent succeeded for target {target_name} with tool {tool_name}")
-        return command
+        return errors
 
     print(f"AnalysisAgent failed for target {target_name} with tool {tool_name}")
     return None

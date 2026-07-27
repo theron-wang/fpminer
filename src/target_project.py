@@ -29,6 +29,7 @@ FAT_JAR_GRADLE_CONTENT = """allprojects {
 
 
 def _build_gradle_jar(directory: Path):
+    """Build the project's fpMiner-classified fat jar via a temporary init script."""
     init_script = directory / "fpminer-fatjar.gradle"
     init_script.write_text(FAT_JAR_GRADLE_CONTENT)
     try:
@@ -42,10 +43,12 @@ def _build_gradle_jar(directory: Path):
 
 
 class TargetProject:
+    """Represents a target repository and its checker-specific workspaces."""
     active_checker: str
     errors: list[CheckerError]
 
     def __init__(self, target_name: str, target_url: str):
+        """Initialize target metadata and detect its build system file."""
         self.target_name = target_name
         self.target_url = target_url
         self.base_dir = Path(f"targets/{target_name}")

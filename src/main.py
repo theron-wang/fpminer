@@ -22,6 +22,7 @@ faulthandler.enable()
 
 
 def ensure_posix_and_docker():
+    """Validate host assumptions required by the pipeline."""
     if os.name != 'posix':
         print(
             "Error: This script must be run on a POSIX-compliant operating system (e.g., Linux, macOS). If using Windows, use WSL.")
@@ -35,6 +36,7 @@ def ensure_posix_and_docker():
 
 
 def run(target: Target, checkers: list[str], flog: FailureLogger):
+    """Process one target repository against all configured checkers."""
     flog.start_target(target.name)
 
     try:
@@ -121,6 +123,7 @@ def run(target: Target, checkers: list[str], flog: FailureLogger):
 
 
 def main():
+    """Parse CLI inputs and execute the false-positive mining pipeline."""
     parser = argparse.ArgumentParser()
     parser.add_argument("-c", "--checkers", type=str, help="Path to the file containing the list of checkers to run")
     parser.add_argument("-t", "--targets", type=str,
@@ -180,6 +183,7 @@ def main():
 
 @dataclass
 class Target:
+    """Input row describing a repository target to process."""
     name: str
     url: str
 

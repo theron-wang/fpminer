@@ -1,46 +1,55 @@
 # false-positives-miner
 
----
+Pipeline for mining and reducing Checker Framework false positives across target Java repositories.
 
-To setup:
+## Setup
 
 ```bash
 uv sync
 ```
 
-Create a `.env` file in the directory root:
+Create a `.env` file in the repository root:
 
-```
+```dotenv
 GEMINI_API_KEY=your-key
 EXEC_AGENT_MODEL=model to use
 SPECIMIN=(optional path to a local copy of Specimin)
 ```
 
-**NOTE:** This tool requires Docker. Ensure it is installed, on PATH, and running.
-You must also ensure that this script is being run in a POSIX-style environment.
-If you are using Windows, run this in WSL.
+## Runtime requirements
 
-To run:
+- Docker installed, available on `PATH`, and running.
+- A POSIX-style environment (Linux/macOS, or WSL on Windows).
+
+## Usage
 
 ```bash
 py src/main.py -c checkers.txt -t targets.jsonl
 ```
 
-Where `checkers.txt` is a list of fully-qualified Checker Framework checkers:
-```
-org.checkerframework.checker.nullness.NullnessChecker
-org.checkerframework.checker.resourceleak.ResourceLeakChecker
-org.checkerframework.checker.interning.InterningChecker
-```
+- `checkers.txt`: one fully-qualified Checker Framework checker per line, for example:
 
-And `targets.jsonl` is a list of target repositories:
-```json lines
-{"name": "jopt-simple", "url": "https://github.com/jopt-simple/jopt-simple"}
-```
+  ```text
+  org.checkerframework.checker.nullness.NullnessChecker
+  org.checkerframework.checker.resourceleak.ResourceLeakChecker
+  org.checkerframework.checker.interning.InterningChecker
+  ```
 
-You may view AnalysisAgent run logs in `/logs`.
+- `targets.jsonl`: one target repository per line, for example:
 
-Specimin logs are in multiple locations:
-* Failed minimizations: `./failed_minimizations.txt`
-* Failed compilations: `./workspace/{target name}/{tool name}/{error #}/failed_compilations.txt`
-* Failed preservations: `./workspace/{target name}/{tool name}/{error #}/failed_preservations.txt`
+  ```json lines
+  {"name": "jopt-simple", "url": "https://github.com/jopt-simple/jopt-simple"}
+  ```
+
+## Logs and outputs
+
+- Pipeline run logs: `logs/run_<timestamp>/`
+- Failed minimizations: `logs/run_<timestamp>/failed_minimizations.jsonl` and `.log`
+- Failed compilations: `logs/run_<timestamp>/failed_compilations.jsonl` and `.log`
+- Failed preservations: `logs/run_<timestamp>/failed_preservations.jsonl` and `.log`
+- Unhandled crashes: `logs/run_<timestamp>/crashes.jsonl` and `.log`
+- Refactor outputs: `logs/run_<timestamp>/refactor_results.jsonl` and `.log`
+
+## Contributor/agent guidance
+
+See [`AGENTS.md`](./AGENTS.md) for repository-specific expectations.

@@ -9,12 +9,12 @@ import argparse
 import checker_framework
 import differential_tester
 import dotenv
-import specimin
 from differential_tester import DifferentialTester
-from java_parser import get_target_signature_and_modularity_model
 from logger import FailureLogger
 from more_itertools import first
-from refactor_agent import RefactorAgent
+from refactoring.refactor_agent import RefactorAgent
+from specimin import specimin
+from specimin.java_parser import get_target_signature_and_modularity_model
 from target_project import TargetProject
 from utils import run_checker_and_parse_errors
 

@@ -1,9 +1,6 @@
 import io
-import json
 import os
 import re
-import shlex
-import shutil
 import subprocess
 import tarfile
 from pathlib import Path
@@ -12,36 +9,14 @@ from typing import IO, cast
 import tree_sitter_bash
 from analysis_agent.mini_orchestrator import sanitize_for_filename, run_with_attempts
 from analysis_agent.replay_producer import produce_replay
-from checker_framework import get_path_to_checker_jar, get_path_to_checker_dir, get_path_to_dljc, get_javac_path
 from minisweagent.environments.local import LocalEnvironment
 from minisweagent.models.litellm_model import LitellmModel
 from tree_sitter import Language, Parser
-from utils import run_checker_and_parse_errors
 
 LOGS_ROOT = Path("analysis_agent_logs")
 
-DLJC_BUILD_COMMANDS = [
-    ["./gradlew", "compileJava", "--rerun-tasks"],
-    ["./mvnw", "compile"]
-]
 
-
-def enable_checkers(target_name: str, target_url: str, tool_name: str, tool_url: str) -> tuple[bool, str | None]:
-    print(f"Running do-like-javac on {target_name} with tool {tool_name}")
-
-    already_existed = os.path.exists(f"targets/{target_name}")
-
-    cmd_from_dljc = _try_do_like_javac(target_name, target_url, tool_name)
-
-    if cmd_from_dljc:
-        print("do-like-javac successful. Skipping AnalysisAgent.")
-        return True, cmd_from_dljc
-
-    return False
-
-    if not already_existed:
-        shutil.rmtree(f"targets/{target_name}")
-
+def run_analysis_agent(target_name: str, target_url: str, tool_name: str, tool_url: str) -> str | None:
     success = True
 
     print(f"Running AnalysisAgent on {target_name} with tool {tool_name}")
@@ -70,7 +45,7 @@ def enable_checkers(target_name: str, target_url: str, tool_name: str, tool_url:
         )
 
     if not success:
-        return False, None
+        return None
 
     # AnalysisAgent automatically cleans up the Docker container after execution,
     # so we need to reconstruct the output
@@ -79,93 +54,7 @@ def enable_checkers(target_name: str, target_url: str, tool_name: str, tool_url:
     print("Reconstruction complete.")
     print()
 
-    return True, command
-
-
-def _try_do_like_javac(target_name: str, target_url: str, tool_name: str):
-    if os.path.exists(f"targets/{target_name}"):
-        print(f"Target {target_name} already exists, skipping cloning")
-    else:
-        _clone_target(target_name, target_url)
-
-    # dljc needs this
-    os.environ.setdefault("CHECKERFRAMEWORK", str(get_path_to_checker_dir().resolve()))
-
-    dljc_path = get_path_to_dljc()
-
-    for build_command in DLJC_BUILD_COMMANDS:
-        dljc_cmd = shlex.join(
-            [str(dljc_path.resolve()), "--lib", str(get_path_to_checker_jar().resolve()), "-t", "print",
-             "--checker", tool_name, "--jdkVersion", "17", "--"] + build_command)
-
-        javac_commands = _run_dljc_print(dljc_cmd, f"targets/{target_name}")
-
-        if not javac_commands:
-            continue
-
-        output_cmd = " ; ".join([
-            _build_javac_command(javac_command, tool_name)
-            for javac_command in javac_commands
-        ])
-
-        errors = run_checker_and_parse_errors(output_cmd, Path(f"targets/{target_name}"))
-
-        if errors:
-            return output_cmd
-
-    return None
-
-
-def _run_dljc_print(dljc_cmd: str, cwd: str) -> list[dict] | None:
-    result = subprocess.run(dljc_cmd, cwd=cwd, capture_output=True, text=True, check=False, shell=True)
-    json_start = result.stdout.find("{")
-    if json_start == -1:
-        return None
-    try:
-        parsed = json.loads(result.stdout[json_start:])
-    except json.JSONDecodeError:
-        return None
-    return parsed.get("javac_commands", [])
-
-
-def _build_javac_command(javac_command: dict, tool_name: str) -> str:
-    switches = javac_command["javac_switches"]
-    java_files = javac_command["java_files"]
-
-    cmd = [str(get_javac_path().resolve()), "-processor", tool_name]
-
-    for key, value in switches.items():
-        if key in ("proc:none", "h"):
-            # proc:none conflicts with -processor; -h (native headers) isn't needed here.
-            continue
-        flag = f"-{key}"
-        if value is True:
-            cmd.append(flag)
-        else:
-            cleaned = value.strip('"') if isinstance(value, str) else value
-            cmd.extend([flag, str(cleaned)])
-
-    cmd.extend(java_files)
-
-    return shlex.join(cmd)
-
-
-def _run_dljc(dljc_cmd: str, checker_bin_javac: Path, tool_name: str) -> str:
-    javac_commands = _run_dljc_print(dljc_cmd)
-    outputs = [
-        _build_javac_command(javac_command, checker_bin_javac, tool_name)
-        for javac_command in javac_commands
-    ]
-    return "\n".join(outputs)
-
-
-def _clone_target(target_name: str, target_url: str):
-    clone_to = Path("targets") / target_name
-
-    subprocess.run(
-        ["git", "clone", target_url, clone_to, "-b", "master", "--depth", "1"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
-    )
+    return command
 
 
 def _reconstruct(target_name: str, tool_name: str, output_dir: str):

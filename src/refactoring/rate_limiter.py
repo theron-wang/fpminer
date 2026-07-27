@@ -1,5 +1,8 @@
+import os
 import threading
 import time
+
+import dotenv
 
 
 class TokenBucketRateLimiter:
@@ -36,5 +39,6 @@ class TokenBucketRateLimiter:
             time.sleep(wait_time)
 
 
-# gemini-3.1-flash-lite has a limit of 15 requests per minute
-GLOBAL_MODEL_RATE_LIMITER = TokenBucketRateLimiter(max_per_minute=15)
+dotenv.load_dotenv()
+
+GLOBAL_MODEL_RATE_LIMITER = TokenBucketRateLimiter(max_per_minute=int(os.environ.get("REFACTOR_AGENT_MAX_RPM", 15)))

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from refactor_agent import RefactorAgentRun
+from refactoring.refactor_agent import RefactorAgentRun
 from utils import CheckerError
 
 LOGGER_LEVEL = logging.WARNING

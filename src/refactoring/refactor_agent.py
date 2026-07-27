@@ -8,9 +8,9 @@ from pathlib import Path
 import checker_framework
 from attr import dataclass
 from differential_tester import DifferentialTester
-from java_parser import get_method_text_for_signature
 from pydantic_ai import Agent, UsageLimits, RunContext
 from rate_limiter import GLOBAL_MODEL_RATE_LIMITER
+from specimin.java_parser import get_method_text_for_signature
 from tenacity import (
     retry,
     retry_if_exception,

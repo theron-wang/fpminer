@@ -4,10 +4,8 @@ import subprocess
 from pathlib import Path
 from typing import Tuple
 
-from autobuilding import enable_checkers
+from checker_setup.main import setup_checker
 from utils import find_build_system_file, replace_in_uncommitted_changes
-
-CF_URL = "https://github.com/typetools/checker-framework/"
 
 FAT_JAR_GRADLE_CONTENT = """allprojects {
     afterEvaluate { project ->
@@ -61,8 +59,8 @@ class TargetProject:
 
     def enable_checker(self, checker: str):
         """Enable `checker` in the build file. Should only be called once, at the start."""
-        success, command = enable_checkers(
-            self.target_name, self.target_url, checker, CF_URL
+        success, command = setup_checker(
+            self.target_name, self.target_url, checker
         )
         if not success:
             raise RuntimeError(f"Failed to enable checkers for {self.target_name}")
@@ -76,7 +74,7 @@ class TargetProject:
         """Copy the committed base repo into a fresh workspace dir for `checker`
         and return the copied repo's path and the updated checker command."""
         repo_dir = Path(f"workspace/{self.target_name}/{checker}/{self.target_name}")
-        
+
         self.command = self.command.replace(checker_template, checker)
         self.active_checker = checker
 

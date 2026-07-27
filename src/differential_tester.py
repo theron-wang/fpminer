@@ -12,6 +12,7 @@ POM_NS = "http://maven.apache.org/POM/4.0.0"
 
 
 def setup():
+    """Ensure the differential-testing helper repository is available locally."""
     if os.path.exists(DIFF_TEST_DIR):
         # Reset first in case diff test directory changes were not cleaned up properly
         run_git_reset_hard(Path(DIFF_TEST_DIR))
@@ -67,6 +68,7 @@ def _format_maven_profile(jar_path: Path, target_name: str) -> str:
 
 class DifferentialTester:
     def __init__(self, jar_path: Path, original_dir: Path, target_name: str):
+        """Configure the differential tester to evaluate one target project jar."""
         self.target_name = target_name
         self.original_dir = original_dir
 
@@ -97,6 +99,7 @@ class DifferentialTester:
         tree.write(pom_path, encoding="utf-8", xml_declaration=True)
 
     def check_semantic_equivalence(self, modified_dir: Path) -> bool:
+        """Run differential tests and return whether divergence was not observed."""
         result = subprocess.run(
             ["python3", "run.py", self.target_name, "--original", str(self.original_dir.resolve()), "--refactored",
              str(modified_dir.resolve())],

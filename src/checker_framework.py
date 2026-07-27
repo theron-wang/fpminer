@@ -17,12 +17,14 @@ CHECKER_FRAMEWORK_URL = (
 
 
 def _download(url: str):
+    """Download raw bytes from the provided URL."""
     req = urllib.request.Request(url)
     with urllib.request.urlopen(req) as resp:
         return resp.read()
 
 
 def setup():
+    """Ensure the Checker Framework is downloaded under `cf/`."""
     if os.path.exists("cf"):
         return
 
@@ -38,15 +40,18 @@ def setup():
 
 
 def get_path_to_dljc() -> Path:
+    """Return the path to the bundled `dljc` executable."""
     # CF ships with dljc
     return next(Path("cf").rglob("dljc"))
 
 
 def get_path_to_checker_dir() -> Path:
+    """Return the extracted Checker Framework root directory."""
     return next(Path("cf").iterdir())
 
 
 def get_path_to_checker_jar() -> Path:
+    """Return the path to `checker.jar` from the local CF install."""
     return next(Path("cf").rglob("checker.jar"))
 
 
@@ -54,6 +59,7 @@ _javac_path = None
 
 
 def get_javac_path():
+    """Resolve and cache the Checker Framework `javac` path."""
     global _javac_path
     if _javac_path is None:
         _javac_path = next(Path("cf").rglob("javac")).resolve()
@@ -61,6 +67,7 @@ def get_javac_path():
 
 
 def get_command_for_checker(checker_name: str, working_dir: Path):
+    """Build a shell command that runs a checker on all Java files in `working_dir`."""
     return f"{get_javac_path()} -processor {checker_name} {
     shlex.join([str(f.resolve()) for f in working_dir.glob("**/*.java")])
     }"

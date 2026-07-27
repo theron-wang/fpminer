@@ -105,11 +105,9 @@ def run(target: Target, checkers: list[str], flog: FailureLogger):
 
                 agent = RefactorAgent(specimin_output, checker, error_transposed, other_errors, targets[0], repo_dir,
                                       diff_tester)
-                # result = agent.run()
+                result = agent.run()
 
-                diff_tester.run(agent.diff_testing_dir)
-
-                # flog.log_refactor_result(target.name, checker, index + 1, result, executed_specimin_cmd)
+                flog.log_refactor_result(target.name, checker, index + 1, result, executed_specimin_cmd)
 
                 flog.log_success(target.name, checker, index + 1)
                 print(f"<====== Processing of error {index + 1} complete")

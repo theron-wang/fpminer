@@ -40,5 +40,6 @@ cf/
 failed_minimizations.txt
 analysis_agent_logs/
 problems_memory/
+diff_test/
 
 .env

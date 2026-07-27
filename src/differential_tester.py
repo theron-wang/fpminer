@@ -83,7 +83,7 @@ class DifferentialTester:
 
         # Wrap the single profile string in a namespaced <profiles> so it parses
         # with the correct namespace instead of picking up a blank one.
-        profile_str = _format_maven_profile(jar_path, target_name)
+        profile_str = _format_maven_profile(jar_path.resolve(), target_name)
         new_profiles = XML.fromstring(f'<profiles xmlns="{POM_NS}">{profile_str}</profiles>')
 
         old_profiles = root.find("m:profiles", ns)
@@ -96,8 +96,18 @@ class DifferentialTester:
 
         tree.write(pom_path, encoding="utf-8", xml_declaration=True)
 
-    def run(self, modified_dir: Path):
-        subprocess.run(
+    def check_semantic_equivalence(self, modified_dir: Path) -> bool:
+        result = subprocess.run(
             ["python3", "run.py", self.target_name, "--original", str(self.original_dir.resolve()), "--refactored",
              str(modified_dir.resolve())],
-            cwd=DIFF_TEST_DIR)
+            cwd=DIFF_TEST_DIR,
+            capture_output=True,
+            text=True
+        )
+
+        # EQUIVALENT=1 cannot be checked since we run the differential tester on the original
+        # project file, so there may be other methods beside the target method
+
+        # The other methods haven't changed, so they will never count towards DIVERGENT (but may
+        # towards ERROR or SKIP), so if DIVERGENT=0, then the method is (likely) semantically equivalent.
+        return result.returncode == 0 and not "DIVERGENT=0" in result.stdout

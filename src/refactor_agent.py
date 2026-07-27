@@ -62,6 +62,8 @@ def _is_rate_limit_or_service_unavailable_error(exc: BaseException) -> bool:
 
 @dataclass
 class RefactorAgentRun:
+    orig_dir: Path
+    modified_dir: Path
     success: bool = False
     possible: bool = False
     error: str | None = None
@@ -182,7 +184,7 @@ class RefactorAgent:
             return json.dumps(payload)
 
         @self.agent.tool
-        def check_semantic_equivalence(ctx: RunContext[None]) -> str:
+        def check_semantic_equivalence(ctx: RunContext[None]) -> bool:
             """Run full differential testing to verify your edit preserves semantic
             equivalence with the original code.
 
@@ -205,12 +207,11 @@ class RefactorAgent:
             DISCOURAGED except when genuinely necessary to resolve ambiguity you
             cannot otherwise resolve.
 
-            Returns a JSON string:
-              {"success": bool, "message": str}
+            Returns true if your refactor is semantically equivalent, false if not.
             """
             GLOBAL_MODEL_RATE_LIMITER.acquire()
 
-            return json.dumps(self._run_differential_testing())
+            return self._run_differential_testing()
 
         @self.agent.tool
         def view_file(ctx: RunContext[None], relative_path: str) -> str:
@@ -424,6 +425,17 @@ class RefactorAgent:
                     ),
                 })
 
+            if not self._run_differential_testing():
+                return json.dumps({
+                    "finished": False,
+                    "success": False,
+                    "error_count": 0,
+                    "errors": [],
+                    "message": (
+                        "Your refactor is not semantically equivalent."
+                    ),
+                })
+
             self.finished = True
             self.success = True
             return json.dumps({
@@ -431,7 +443,7 @@ class RefactorAgent:
                 "success": True,
                 "error_count": 0,
                 "errors": [],
-                "message": "Checker passed with zero errors. Session complete.",
+                "message": "Checker passed with zero errors and your refactor is semantically equivalent. Session complete.",
             })
 
     def run(self) -> RefactorAgentRun:
@@ -440,7 +452,7 @@ class RefactorAgent:
         """
         initial_prompt = self._build_initial_prompt()
 
-        result = RefactorAgentRun()
+        result = RefactorAgentRun(self.orig_directory, self.modified_directory)
 
         try:
             self._run_sync_with_rate_limit_retry(initial_prompt)
@@ -488,8 +500,8 @@ class RefactorAgent:
 
         return errors
 
-    def _run_differential_testing(self) -> str:
-        pass
+    def _run_differential_testing(self) -> bool:
+        return self.differential_tester.check_semantic_equivalence(self.diff_testing_dir)
 
     def _build_initial_prompt(self) -> str:
         """

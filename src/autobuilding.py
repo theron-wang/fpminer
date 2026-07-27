@@ -22,19 +22,9 @@ LOGS_ROOT = Path("analysis_agent_logs")
 
 DLJC_BUILD_COMMANDS = [
     ["./gradlew", "compileJava", "--rerun-tasks"],
-    ["gradle", "compileJava", "--rerun-tasks"],
-    ["./mvnw", "compile"],
-    ["mvn", "compile"],
-    ["ant", "compile"],
+    ["./mvnw", "compile"]
 ]
 
-
-# Available models:
-# gemini/gemini-3-flash-preview
-# gemini/gemini-3.5-flash
-# gemini/gemini-2.5-flash
-# gemini/gemini-2.5-flash-lite
-# gemini/gemini-3.1-flash-lite
 
 def enable_checkers(target_name: str, target_url: str, tool_name: str, tool_url: str) -> tuple[bool, str | None]:
     print(f"Running do-like-javac on {target_name} with tool {tool_name}")

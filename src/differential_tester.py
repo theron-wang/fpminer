@@ -67,8 +67,16 @@ def _format_maven_profile(jar_path: Path, target_name: str) -> str:
 
 
 class DifferentialTester:
+    """Runs differential fuzz testing between original and refactored project code."""
+
     def __init__(self, jar_path: Path, original_dir: Path, target_name: str):
-        """Configure the differential tester to evaluate one target project jar."""
+        """
+        Configure the differential tester to evaluate one target project jar.
+
+        :param jar_path: Path to the built target project jar.
+        :param original_dir: Path to the original project directory.
+        :param target_name: Identifier of the target project dataset/profile.
+        """
         self.target_name = target_name
         self.original_dir = original_dir
 
@@ -99,7 +107,12 @@ class DifferentialTester:
         tree.write(pom_path, encoding="utf-8", xml_declaration=True)
 
     def check_semantic_equivalence(self, modified_dir: Path) -> bool:
-        """Run differential tests and return whether divergence was not observed."""
+        """
+        Run differential tests against the refactored code.
+
+        :param modified_dir: Path to the refactored project directory.
+        :return: True when the run reports no divergence, otherwise False.
+        """
         result = subprocess.run(
             ["python3", "run.py", self.target_name, "--original", str(self.original_dir.resolve()), "--refactored",
              str(modified_dir.resolve())],

@@ -116,8 +116,16 @@ class DifferentialTestResult(Enum):
 
 
 class DifferentialTester:
+    """Runs differential fuzz testing between original and refactored project code."""
+
     def __init__(self, jar_path: Path, original_dir: Path, target_name: str):
-        """Configure the differential tester to evaluate one target project jar."""
+        """
+        Configure the differential tester to evaluate one target project jar.
+
+        :param jar_path: Path to the built target project jar.
+        :param original_dir: Path to the original project directory.
+        :param target_name: Identifier of the target project dataset/profile.
+        """
         self.target_name = target_name
         self.original_dir = original_dir
 

@@ -49,7 +49,12 @@ class TargetProject:
     build_file: Path
 
     def __init__(self, target_name: str, target_url: str):
-        """Initialize target metadata and detect its build system file."""
+        """
+        Initialize target metadata and detect its build system file.
+
+        :param target_name: Name used to identify the target repository locally.
+        :param target_url: Git URL used to clone the target repository.
+        """
         self.target_name = target_name
         self.target_url = target_url
         self.base_dir = Path(f"targets/{target_name}")

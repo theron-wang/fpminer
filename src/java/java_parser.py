@@ -38,7 +38,7 @@ def _get_target(tree: Tree, source: bytes, error: CheckerError) -> Tuple[Node | 
     return node, False
 
 
-def _get_package_name(tree: Tree) -> str | None:
+def get_package_name(tree: Tree) -> str | None:
     root = tree.root_node
 
     for child in root.children:
@@ -151,7 +151,7 @@ def _iter_declaration_nodes(node: Node):
         yield from _iter_declaration_nodes(child)
 
 
-def get_method_text_for_signature(file_path: Path, target_signature: str) -> str | None:
+def get_method_text_for_signature(file_path: Path, target_signature: str) -> str:
     """
     Given a file and a target signature (matching the format produced by
     get_target_signature_and_modularity_model - e.g.
@@ -173,7 +173,7 @@ def get_method_text_for_signature(file_path: Path, target_signature: str) -> str
         source = f.read()
 
     tree = parser.parse(source)
-    package = _get_package_name(tree)
+    package = get_package_name(tree)
 
     for node in _iter_declaration_nodes(tree.root_node):
         if _is_node_in_anonymous_class(node):
@@ -182,7 +182,7 @@ def get_method_text_for_signature(file_path: Path, target_signature: str) -> str
         if target_signature in _get_signatures_for_node(node, package):
             return _convert_node_to_string(node)
 
-    return None
+    return ""
 
 
 def get_target_signature_and_modularity_model(root_dir: Path, error: CheckerError) -> Tuple[list[str], bool]:
@@ -198,6 +198,6 @@ def get_target_signature_and_modularity_model(root_dir: Path, error: CheckerErro
 
     assert target is not None
 
-    package = _get_package_name(tree)
+    package = get_package_name(tree)
 
     return _get_signatures_for_node(target, package), nullaway

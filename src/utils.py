@@ -42,11 +42,6 @@ def parse_errors_from_checker_output(output: str) -> list[CheckerError]:
     return errors
 
 
-def read_file_with_numbered_lines(path: Path) -> str:
-    lines = path.read_text().splitlines()
-    return "\n".join(f"{i + 1:d}\t{line}" for i, line in enumerate(lines))
-
-
 def _split_message(message: str) -> tuple[str, set[str] | None]:
     match = _content_regex.match(message)
     if not match:

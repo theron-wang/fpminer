@@ -46,18 +46,13 @@ class TargetProject:
     """Represents a target repository and its checker-specific workspaces."""
     active_checker: str
     errors: list[CheckerError]
+    build_file: Path
 
     def __init__(self, target_name: str, target_url: str):
         """Initialize target metadata and detect its build system file."""
         self.target_name = target_name
         self.target_url = target_url
         self.base_dir = Path(f"targets/{target_name}")
-        build_file = find_build_system_file(self.base_dir)
-
-        if not build_file:
-            raise ValueError(f"Could not detect build file for target {target_name}")
-
-        self.build_file = build_file
 
     def checkout_workspace(self, checker: str, checker_template: str) -> Path:
         """
@@ -77,6 +72,12 @@ class TargetProject:
         if not errors:
             raise RuntimeError(f"Failed to enable checkers for {self.target_name}")
 
+        build_file = find_build_system_file(self.base_dir)
+
+        if not build_file:
+            raise ValueError(f"Could not detect build file for target {self.target_name}")
+
+        self.build_file = build_file
         self.errors = errors
         self.active_checker = checker
 

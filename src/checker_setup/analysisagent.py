@@ -6,6 +6,7 @@ import tarfile
 from pathlib import Path
 from typing import IO, cast
 
+import docker
 import tree_sitter_bash
 from analysis_agent.mini_orchestrator import sanitize_for_filename, run_with_attempts
 from analysis_agent.replay_producer import produce_replay
@@ -204,8 +205,6 @@ def _reconstruct(target_name: str, tool_name: str, output_dir: str) -> str:
         raise RuntimeError("Could not find image name in launch.sh output")
 
     image_name = match.group(1)
-
-    import docker
 
     client = docker.from_env()
     os.makedirs(output_dir, exist_ok=True)

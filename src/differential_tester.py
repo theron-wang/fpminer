@@ -1,8 +1,11 @@
 import os
 import subprocess
 import xml.etree.ElementTree as XML
+from enum import Enum
 from pathlib import Path
+from typing import Tuple
 
+import regex
 from utils import run_git_reset_hard
 
 DIFF_TEST_REPO_URL = "https://github.com/musta55/Differential-Fuzz-Testing.git"
@@ -27,6 +30,46 @@ def setup():
         ["git", "clone", DIFF_TEST_REPO_URL, DIFF_TEST_DIR, "--depth", "1"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
     )
+
+
+def read_fuzz_report(path: Path) -> list[Tuple[str, str]]:
+    """
+    Reads the differential tester's markdown report, and extracts the methods' test
+    result and reason for divergence. Returns a list of tuples of (result, evidence).
+
+    :param path: The path to the fuzz report
+    :return: A list of tuples of (result, evidence)
+    """
+    text = path.read_text()
+
+    reports = []
+
+    # Reports look like this:
+    """
+    | Method | Result | Tests (fail) | Branch | Line | Evidence |
+    |--------|--------|--------------|--------|------|----------|
+    | Simple.foo | **DIVERGENT** | 34 (34) | 0/0 | 1/1 | orig: returns null vs ref: throws Error |
+    | Simple.bar | **DIVERGENT** | 5 (5) | 0/0 | 1/1 | orig: returns null vs ref: throws Error |
+    """
+
+    result_index = 1
+    evidence_index = 5
+
+    for line in text.split("\n"):
+        if not line.startswith("|") or line.startswith("|-"):
+            continue
+
+        parts = [part.strip() for part in line.split("|") if part.strip()]
+
+        # In case the implementation changes down the line
+        if "Result" in parts:
+            result_index = parts.index("Result")
+            evidence_index = parts.index("Evidence")
+            continue
+
+        reports.append((parts[result_index].replace("*", ""), parts[evidence_index]))
+
+    return reports
 
 
 def _format_maven_profile(jar_path: Path, target_name: str) -> str:
@@ -66,6 +109,12 @@ def _format_maven_profile(jar_path: Path, target_name: str) -> str:
 """
 
 
+class DifferentialTestResult(Enum):
+    SUCCESS = 0
+    FAILURE = 1
+    INCONCLUSIVE = 2
+
+
 class DifferentialTester:
     def __init__(self, jar_path: Path, original_dir: Path, target_name: str):
         """Configure the differential tester to evaluate one target project jar."""
@@ -98,8 +147,15 @@ class DifferentialTester:
 
         tree.write(pom_path, encoding="utf-8", xml_declaration=True)
 
-    def check_semantic_equivalence(self, modified_dir: Path) -> bool:
-        """Run differential tests and return whether divergence was not observed."""
+    def check_semantic_equivalence(self, modified_dir: Path) -> Tuple[DifferentialTestResult, str]:
+        """
+        Runs the differential test on the original directory and the modified directory.
+        Returns the result of the test and the error message, if applicable. This method
+        may return INCONCLUSIVE if some error makes the differential tester never run.
+
+        :param modified_dir: The directory to test against (the "refactored")
+        :return: The result of the test, along with an error message if applicable
+        """
         result = subprocess.run(
             ["python3", "run.py", self.target_name, "--original", str(self.original_dir.resolve()), "--refactored",
              str(modified_dir.resolve())],
@@ -108,9 +164,27 @@ class DifferentialTester:
             text=True
         )
 
-        # EQUIVALENT=1 cannot be checked since we run the differential tester on the original
-        # project file, so there may be other methods beside the target method
+        if result.returncode != 0:
+            return DifferentialTestResult.INCONCLUSIVE, ""
 
-        # The other methods haven't changed, so they will never count towards DIVERGENT (but may
-        # towards ERROR or SKIP), so if DIVERGENT=0, then the method is (likely) semantically equivalent.
-        return result.returncode == 0 and not "DIVERGENT=0" in result.stdout
+        if "EQUIVALENT=1" in result.stdout:
+            return DifferentialTestResult.SUCCESS, ""
+
+        fuzz_report_path = Path(regex.match(r"->\s*(?P<report>.*)", result.stdout).group("report"))
+
+        result = read_fuzz_report(fuzz_report_path)
+
+        if len(result) > 1:
+            return DifferentialTestResult.INCONCLUSIVE, "More than one method was modified when only one should have been"
+        elif len(result) == 0:
+            # This is technically successful, since this means all methods are the same between the two.
+            # Since this is used by refactor_agent anyway, the checker will not pass if no changes have
+            # been made, so this isn't a problem
+            return DifferentialTestResult.SUCCESS, ""
+
+        status, reasoning = result[0]
+
+        if status == "DIVERGENT":
+            return DifferentialTestResult.FAILURE, reasoning
+        else:
+            return DifferentialTestResult.INCONCLUSIVE, ""

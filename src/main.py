@@ -3,6 +3,7 @@ from __future__ import annotations
 import faulthandler
 import json
 import os
+import subprocess
 from dataclasses import dataclass
 
 import argparse
@@ -10,11 +11,11 @@ import checker_framework
 import differential_tester
 import dotenv
 from differential_tester import DifferentialTester
+from java import specimin
+from java.java_parser import get_target_signature_and_modularity_model
 from logger import FailureLogger
 from more_itertools import first
 from refactoring.refactor_agent import RefactorAgent
-from specimin import specimin
-from specimin.java_parser import get_target_signature_and_modularity_model
 from target_project import TargetProject
 from utils import run_checker_and_parse_errors
 
@@ -28,11 +29,11 @@ def ensure_posix_and_docker():
             "Error: This script must be run on a POSIX-compliant operating system (e.g., Linux, macOS). If using Windows, use WSL.")
         exit(1)
 
-    # try:
-    #     subprocess.run(["docker", "version"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    # except (subprocess.CalledProcessError, FileNotFoundError):
-    #     print("Error: Docker is not installed, not in the PATH, or the engine is not running.")
-    #     exit(1)
+    try:
+        subprocess.run(["docker", "version"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("Error: Docker is not installed, not in the PATH, or the engine is not running.")
+        exit(1)
 
 
 def run(target: Target, checkers: list[str], flog: FailureLogger):

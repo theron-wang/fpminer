@@ -12,8 +12,11 @@ Create a `.env` file in the repository root:
 
 ```dotenv
 GEMINI_API_KEY=your-key
-EXEC_AGENT_MODEL=model to use
+EXEC_AGENT_MODEL=model to use for AnalysisAgent (LiteLLM format: e.g., gemini/gemini-3-flash-preview)
 SPECIMIN=(optional path to a local copy of Specimin)
+REFACTOR_AGENT_MODEL=model to use for refactoring (PydanticAI format: e.g., google:gemini-3-flash-preview)
+REFACTOR_AGENT_MAX_RPM=max requests per minute for refactoring agent
+CHECKER_FRAMEWORK_VERSION=the CF version to use
 ```
 
 ## Runtime requirements

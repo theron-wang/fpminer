@@ -17,7 +17,7 @@ from tenacity import (
     wait_exponential_jitter,
     before_sleep_log,
 )
-from utils import CheckerError, run_checker_and_parse_errors, find_source_dir
+from utils import CheckerError, run_checker_and_parse_errors, find_source_dir, whitespace_flexible_pattern
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ def _is_rate_limit_or_service_unavailable_error(exc: BaseException) -> bool:
 class RefactorAgentRun:
     orig_dir: Path
     modified_dir: Path
-    differential_test_result: DifferentialTestResult
+    differential_test_result: DifferentialTestResult = DifferentialTestResult.INCONCLUSIVE
     success: bool = False
     possible: bool = False
     error: str | None = None
@@ -86,10 +86,10 @@ class RefactorAgent:
         self.checker_name = checker_name.split('.')[-1]
         self.target_method_signature = target_method_signature
 
-        # if os.path.exists(self.modified_directory):
-        #     shutil.rmtree(self.modified_directory)
-        #
-        # shutil.copytree(str(self.orig_directory), self.modified_directory)
+        if os.path.exists(self.modified_directory):
+            shutil.rmtree(self.modified_directory)
+
+        shutil.copytree(str(self.orig_directory), self.modified_directory)
 
         # Transpose the errors' files paths from the "orig" directory to the "modified" directory
         error.file_path = error.file_path.replace(str(orig_directory), str(self.modified_directory))
@@ -127,23 +127,31 @@ class RefactorAgent:
         self.differential_test_result = DifferentialTestResult.INCONCLUSIVE
         self.finish_attempts = 0
         self.not_possible_reason = None
-        self._last_checker_run_time: float | None = None
 
         @self.agent.tool
         def run_checker(ctx: RunContext[None]) -> str:
-            """Runs the checker analysis on the modified
-            directory and return a JSON string describing the result.
+            """Runs the checker analysis on the modified directory and returns a JSON
+            string describing the result.
+
+            The errors returned by this tool are the only errors you need to fix.
+            `run_checker` is the trusted source of truth for what still needs work -
+            if an error isn't in this list, it isn't part of your task, so there's no
+            need to go looking for it elsewhere.
+
+            As a convenience, `run_checker` also does the tedious work of filtering
+            the raw checker output down to just the errors that matter for your task,
+            stripping out noise you'd otherwise have to sort through by hand. It's
+            always easier to just call this tool and trust what `run_checker` gives you.
 
             Returns a JSON object of the form:
               {
                 "success": bool,
                 "error_count": int,
                 "errors": [
-                  {"file_path": str, "line_number": int, "content": str},
+                  "Checker Framework error",
                   ...
                 ]
               }
-
             success is true only if the build produced zero errors.
             """
             GLOBAL_MODEL_RATE_LIMITER.acquire()
@@ -159,37 +167,29 @@ class RefactorAgent:
             return json.dumps(payload)
 
         @self.agent.tool
-        def view_original_target_method(ctx: RunContext[None]) -> str:
-            """View the original content of the target method before any changes
-            were made, for reference if the semantics-preserving checker in
-            `finish()` fails.
-            """
-            GLOBAL_MODEL_RATE_LIMITER.acquire()
-
-            return self._get_target_method_content()
-
-        @self.agent.tool
         def edit_target_method(ctx: RunContext[None], old_str: str, new_str: str) -> str:
             """Replace an exact block of text in the target method with new text.
 
-            old_str must match a part of the target method's raw content EXACTLY
-            (no line number prefixes, exact whitespace) and must appear exactly once
-            in the target method. If it appears zero times or more than once, the edit is
-            rejected and no changes are made. Then, widen old_str with a bit more surrounding
-            context (i.e., an extra line above/below) until it is unique.
+            old_str must match a part of the target method's raw content EXACTLY and must appear
+            exactly once in the target method. If old_str appears zero times or more than once,
+            the edit is rejected and no changes are made. Then, widen old_str with a bit more
+            surrounding context (i.e., an extra line above/below) until old_str is unique.
 
             Returns a JSON string:
               {"success": bool, "message": str}
 
-            A call to this tool, regardless of whether it ran successfully, will return the
-            full content of the updated target method.
+            A call to `edit_target_method`, regardless of whether the edit was successful,
+            will return the full content of the updated target method.
             """
             GLOBAL_MODEL_RATE_LIMITER.acquire()
 
             path_to_workspace_copy = Path(self.error_to_fix.file_path)
 
-            content = get_method_text_for_signature(path_to_workspace_copy, self.target_method_signature)
-            count = content.count(old_str)
+            content = self._get_current_target_method_content()
+            pattern = whitespace_flexible_pattern(old_str)
+            matches = list(pattern.finditer(content))
+
+            count = len(matches)
 
             if count == 0:
                 return json.dumps({
@@ -199,7 +199,6 @@ class RefactorAgent:
                         "changed since you last viewed it, or whitespace doesn't match "
                         "exactly. Current content:"
                         "\n\n"
-                        f"`{self.target_method_signature}`:"
                         "```java"
                         f"{content}"
                         "```"
@@ -212,7 +211,6 @@ class RefactorAgent:
                         f"old_str is not unique ({count} occurrences). Add more "
                         "surrounding context (a line above or below) so it "
                         "matches exactly one location. Current content:"
-                        f"`{self.target_method_signature}`:"
                         "\n\n"
                         "```java"
                         f"{content}"
@@ -220,7 +218,8 @@ class RefactorAgent:
                     ),
                 })
 
-            new_method_content = content.replace(old_str, new_str)
+            match = matches[0]
+            new_method_content = content[:match.start()] + new_str + content[match.end():]
 
             file_content = path_to_workspace_copy.read_text()
             new_file_content = file_content.replace(content, new_method_content, 1)
@@ -229,6 +228,10 @@ class RefactorAgent:
 
             # Now, update the mirror copy for when the agent needs to call the diff tester
             file_content = self.mirror_copy_for_differential_testing.read_text()
+
+            # Formatting may be different in the diff test copy (since Specimin runs a formatter)
+            content = get_method_text_for_signature(self.mirror_copy_for_differential_testing,
+                                                    self.target_method_signature)
             new_file_content = file_content.replace(content, new_method_content, 1)
             self.mirror_copy_for_differential_testing.write_text(new_file_content)
 
@@ -237,7 +240,6 @@ class RefactorAgent:
                 "message": (
                     f"Edit applied. Updated content:",
                     "\n\n"
-                    f"`{self.target_method_signature}`:"
                     "```java"
                     f"{new_method_content}"
                     "```"
@@ -246,13 +248,13 @@ class RefactorAgent:
 
         @self.agent.tool
         def not_possible(ctx: RunContext[None], reason: str) -> str:
-            """Call this if, after investigation, it becomes clear there is no way to
+            """Call `not_possible` if, after investigation, you are confident you cannot
             fix the checker error(s) while keeping the code semantically
             equivalent to the original - i.e., any possible fix would change
             runtime behavior on some input, not just satisfy the type checker.
 
-            Only call this tool when it is clear a semantics-preserving fix does
-            not exist. This ends the session immediately; no further tool calls
+            Only call `not_possible` tool when you are confident a semantics-preserving fix does
+            not exist. `not_possible` ends the session immediately; no further tool calls
             will be processed.
 
             Args:
@@ -277,19 +279,17 @@ class RefactorAgent:
 
         @self.agent.tool
         def finish(ctx: RunContext[None]) -> str:
-            """Call this ONLY when confident the target error is resolved. This re-runs
-            the checker to verify specifically that the target error has been fixed, and
-            that additional bugs were not introduced. However, other pre-existing errors
-            elsewhere in the codebase do not block this from succeeding. This will also
-            run the semantic-equivalence checker to ensure that all edits preserve the
-            original method's behavior.
+            """Call `finish` ONLY when confident the target error is resolved. `finish`
+            re-runs the checker, using `run_checker`, to verify specifically that the
+            target error has been fixed, and that additional bugs were not introduced.
+            `finish` will also run a semantic-equivalence checker to ensure that all
+            edits preserve the original method's behavior.
 
-            If the error is still present, the session will NOT end and more edits must
-            be made. However, `finish()` may only be called three times. If
-            `finish()` is called repeatedly without actually resolving the target error,
-            the session will be forcibly terminated as a failure. Only call `finish()` once
-            you are confident that all edits resolves the error, does not introduce any additional
-            errors, and preserves the semantics of the original method.
+            If the error is still present, the session will NOT end and you must make more edits.
+            However, `finish` may only be called three times. If `finish` is called repeatedly
+            without actually resolving the target error, the session will be forcibly terminated as
+            a failure. Only call `finish` once you are confident that all edits resolves the error,
+            does not introduce any additional errors, and preserves the semantics of the original method.
 
             Returns:
                 JSON string: {"finished": bool, "success": bool,
@@ -313,7 +313,7 @@ class RefactorAgent:
                         "error_count": len(errors),
                         "errors": errors,
                         "message": (
-                            "Maximum finish() attempts exceeded. The session is now "
+                            "Maximum finish attempts exceeded. The session is now "
                             "being forcibly ended without a resolved target error."
                         ),
                     })
@@ -326,7 +326,7 @@ class RefactorAgent:
                     "message": (
                         f"Checker still reports {len(errors)} error(s). The session "
                         "is NOT complete. Review the errors below, make further "
-                        "edits with `edit_target_method`, and call finish() again once "
+                        "edits with `edit_target_method`, and call finish again once "
                         "resolved."
                     ),
                 })
@@ -340,7 +340,15 @@ class RefactorAgent:
                     "error_count": 0,
                     "errors": [],
                     "message": (
-                        f"Edited method is not semantically equivalent to original: {message}"
+                        f"Edited method is not semantically equivalent to original. Reason: {message}"
+                        "\n\nOriginal method:\n"
+                        "```java\n"
+                        f"{self._get_original_target_method_content()}"
+                        "\n```"
+                        "\n\nEdited method:\n"
+                        "```java\n"
+                        f"{self._get_current_target_method_content()}"
+                        "\n```\n"
                     ),
                 })
 
@@ -361,7 +369,7 @@ class RefactorAgent:
         """
         initial_prompt = self._build_initial_prompt()
 
-        result = RefactorAgentRun(self.orig_directory, self.modified_directory, self.differential_test_result)
+        result = RefactorAgentRun(self.orig_directory, self.modified_directory)
 
         try:
             self._run_sync_with_rate_limit_retry(initial_prompt)
@@ -369,12 +377,13 @@ class RefactorAgent:
             result.error = f"Agent run failed or exhausted limits: {e}"
             return result
 
-        # agent.run() returned normally, but that doesn't guarantee finish()
+        result.differential_test_result = self.differential_test_result
+        # agent.run() returned normally, but that doesn't guarantee finish
         # or not_possible() was ever actually called - the model may have
         # just stopped producing tool calls.
         if not self.finished:
             result.error = (
-                "Agent stopped without calling finish() or not_possible()."
+                "Agent stopped without calling finish or not_possible()."
             )
         else:
             result.success = self.success
@@ -409,8 +418,12 @@ class RefactorAgent:
 
         return errors
 
-    def _get_target_method_content(self) -> str:
+    def _get_original_target_method_content(self) -> str:
         return get_method_text_for_signature(self.orig_directory / self.target_rel_path,
+                                             self.target_method_signature)
+
+    def _get_current_target_method_content(self) -> str:
+        return get_method_text_for_signature(self.modified_directory / self.target_rel_path,
                                              self.target_method_signature)
 
     def _build_initial_prompt(self) -> str:
@@ -425,8 +438,8 @@ exactly ONE error:
 Your job is to refactor the code so that:
 
 1. The checker passes with zero errors.
-2. The refactor is semantically equivalent to the original code - it must
-   preserve the exact same run-time behavior for all valid inputs. You are
+2. The refactor is semantically equivalent to the original code - the refactor
+   must preserve the exact same run-time behavior for all valid inputs. You are
    fixing a *type-checking* problem, not changing what the program does.
 
 Semantically equivalent means, at minimum:
@@ -442,10 +455,10 @@ Semantically equivalent means, at minimum:
   Avoid changes to unrelated code, broad refactorings, or unnecessary annotation
   changes.
 
-If, after investigating, it is clear that there is NO refactor that both (a)
-fixes the error and (b) preserves semantic equivalence - for example, the
-error reflects a genuine possible null dereference that the original code
-never actually guarded against, and any real fix would necessarily change
+If, after investigating, you are confident that there is NO refactor that
+both (a) fixes the error and (b) is semantically equivalent to the original code -
+for example, the error reflects a genuine possible null dereference that the
+original code never actually guarded against, and any real fix would necessarily change
 behavior on some input. Call `not_possible` with an explanation of why.
 
 ## Making code edits
@@ -453,31 +466,51 @@ behavior on some input. Call `not_possible` with an explanation of why.
 You are only allowed to edit the contents of the target method, which is where
 the error occurs:
 
-`{self.target_method_signature}`:
 ```java
-{self._get_target_method_content()}
+{self._get_original_target_method_content()}
 ```
 
-There may be other parts in this method that trigger this checker. Leave them alone -
-they are out of scope for this task even if it looks like an easy fix. `run_checker`
-ensures you only receive errors and warnings that you need to fix.
+## Determining the correct action
 
-Suppression of errors - including but not limited to `@SuppressWarnings`, assertions,
-or guard clauses - are not valid fixes.
+You should classify the warning into exactly one of two cases:
+
+Case 1: False positive; the checker is wrong. In this case:
+- Make a semantics-preserving refactoring that changes the code so the checker can itself verify
+  the property. For example: restructuring control flow so the checker's flow-sensitive analysis
+  can follow the invariant, extracting a local variable to stabilize a field read,
+  adding a checker-recognized annotation that accurately describes the true contract
+  (not just silencing). The change must not alter observable behavior for any input.
+- A true refactor is a change that improves the code's structure or design without changing its behavior.
+  A warning suppression, by contrast, only makes the warning disappear while that same input still triggers
+  the exception - the warning is silenced, but the underlying problem persists untouched. This holds
+  regardless of the mechanism used to silence the warning, whether @SuppressWarnings, an assertion, a
+  dynamic null-check like Objects.nonNull(), or anything else with the same effect.
+  
+Case 2: Genuine bug. The checker is correct: there is a real input or code path under which
+the flagged expression can be null (or otherwise violate the checker's guarantee) at runtime.
+In this case, call `not_possible`. A genuine bug is out of scope for this task; your job is to
+resolve false positives, not to patch real defects (patching a real defect usually requires
+a behavioral change, which risks breaking semantics, and is a separate task from what you're
+being asked to do here).
+
+Start under the assumption that the warnings are under case 1. If you are confident the
+warning reveals a genuine bug, or become confident that the warning represents a real bug
+once you have tried different edits, you should consider case 2 and call `not_possible` with
+a precise technical explanation of why no semantics-preserving fix exists.
 
 ## How to work
-1. For the given error, make the smallest edit that fixes it using `edit_target_method`.
+1. For the given error, make the smallest edit that fixes the error using `edit_target_method`.
    Calling `edit_target_method` with an edit MUST be the FIRST action, since you have
    already been given the error and the code to fix. If old_str is rejected as not found
    or not unique, the system will return the contents of the target method; treat that as
-   fact and use it to make further edits. Recall that only code in the target method may be
-   edited.
+   fact and use those contents to make further edits. Recall that only code in the target
+   method may be edited.
 2. Call `run_checker` to verify if the edited code fixes the checker error. Ensure that no
-   additional Checker Framework or compiler errors/warnings are introduced.
+   additional Checker Framework or compiler errors/warnings are introduced. A call to `run_checker`
+   provides all the errors and warnings you must fix in order to pass validation, while conveniently
+   filtering out any errors that you do not need to worry about.
 3. Once all errors are resolved, call `finish`. `finish` re-runs the checker and a differential tester
-   to verify that the edited method 1) fixes the error, 2) does not introduce any additional errors, and
-   3) is semantically-equivalent to the original. `finish` may only be called three times,
-   so only call it when confident.
-4. If `finish` returns with a message that the refactored method is not semantically equivalent, call
-   `view_original_target_method` to review the old method definition.
+   to verify that the edited method (1) fixes the error, (2) does not introduce any additional errors, and
+   (3) is semantically equivalent to the original. `finish` may only be called three times,
+   so only call `finish` when confident.
 """

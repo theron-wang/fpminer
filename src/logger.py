@@ -11,16 +11,16 @@ from typing import Any, Optional
 from refactoring.refactor_agent import RefactorAgentRun
 from utils import CheckerError
 
-LOGGER_LEVEL = logging.WARNING
+LOGGER_LEVEL = logging.INFO
 
 
 def _timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-class FailureLogger:
+class FPMinerLogger:
     """
-    Centralized, file-based logger for the false-positives-miner pipeline.
+    Centralized, file-based logger for the fpminer pipeline.
 
     Creates a per-run directory under `logs/` containing:
       - run.log                     human-readable log of everything (DEBUG+ to file,

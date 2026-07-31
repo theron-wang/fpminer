@@ -5,9 +5,8 @@ from pathlib import Path
 
 from utils import CheckerError
 
-specimin = "specimin"
-specimin_url = "https://github.com/njit-jerse/specimin.git"
-specimin_branch = "main"
+SPECIMIN_URL = "https://github.com/njit-jerse/specimin.git"
+DOWNLOAD_TO = Path("tools/specimin")
 
 
 def setup():
@@ -15,15 +14,15 @@ def setup():
         print("Specimin already exists: using local copy")
         return
 
-    if os.path.exists(specimin):
+    if os.path.exists(DOWNLOAD_TO):
         print("Specimin already exists: pulling most recent changes")
         subprocess.run(
             ["git", "pull"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=specimin)
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=DOWNLOAD_TO)
         return
     print("Cloning Specimin from GitHub")
     subprocess.run(
-        ["git", "clone", specimin_url, specimin, "-b", specimin_branch, "--depth", "1"],
+        ["git", "clone", SPECIMIN_URL, DOWNLOAD_TO, "--depth", "1"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
     )
 
@@ -90,7 +89,7 @@ def minimize(error: CheckerError, targets: list[str], nullaway: bool, target_pro
         return True, cmd
 
     result = subprocess.run(["./gradlew", "run", f"--args={specimin_args_as_str}", "-PskipCheckerFramework"],
-                            cwd=os.getenv("SPECIMIN") or specimin,
+                            cwd=os.getenv("SPECIMIN") or DOWNLOAD_TO,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     if result.returncode != 0:

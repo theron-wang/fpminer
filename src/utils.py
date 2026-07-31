@@ -138,6 +138,14 @@ def find_source_dir(path_to_full_project: Path, rel_path: Path) -> Path | None:
     return None
 
 
+def whitespace_flexible_pattern(s: str) -> re.Pattern:
+    tokens = s.split()
+    if not tokens:
+        return re.compile(re.escape(s))
+    pattern = r"\s+".join(re.escape(tok) for tok in tokens)
+    return re.compile(pattern)
+
+
 @dataclass
 class CheckerError:
     file_path: str

@@ -13,7 +13,7 @@ import dotenv
 from differential_tester import DifferentialTester
 from java import specimin
 from java.java_parser import get_target_signature_and_modularity_model
-from logger import FailureLogger
+from logger import FPMinerLogger
 from more_itertools import first
 from refactoring.refactor_agent import RefactorAgent
 from target_project import TargetProject
@@ -36,14 +36,14 @@ def ensure_posix_and_docker():
         exit(1)
 
 
-def run(target: Target, checkers: list[str], flog: FailureLogger):
+def run(target: Target, checkers: list[str], logger: FPMinerLogger):
     """Process one target repository against all configured checkers."""
-    flog.start_target(target.name)
+    logger.start_target(target.name)
 
     try:
-        project = TargetProject(target.name, target.url)
+        project = TargetProject(target.name, target.url, checkers[0])
     except ValueError as exc:
-        flog.logger.error("Failed to enable checkers for %s: %s", target.name, exc)
+        logger.logger.error("Failed to enable checkers for %s: %s", target.name, exc)
         print(f"Failed to enable checkers for {target.name}")
         return
 
@@ -58,7 +58,7 @@ def run(target: Target, checkers: list[str], flog: FailureLogger):
         for index, error in enumerate(project.errors):
             print()
             print(f"Beginning processing of error {index + 1} / {len(project.errors)} ======>")
-            flog.log_error_start(target.name, checker, index + 1, len(project.errors))
+            logger.log_error_start(target.name, checker, index + 1, len(project.errors))
 
             try:
                 targets, nullaway = get_target_signature_and_modularity_model(repo_dir, error)
@@ -66,7 +66,7 @@ def run(target: Target, checkers: list[str], flog: FailureLogger):
                 if not any(t for t in targets if '(' in t):
                     # Targeting only fields means that the code is likely not interesting.
                     print(f"Error {index + 1} only targets fields. Skipping.")
-                    flog.log_skipped_error(target.name, targets, checker, index + 1)
+                    logger.log_skipped_error(target.name, targets, checker, index + 1)
                     print(f"<====== Processing of error {index + 1} complete")
                     continue
 
@@ -78,7 +78,7 @@ def run(target: Target, checkers: list[str], flog: FailureLogger):
                 if min_successful:
                     print("Minimization successful. Proceeding to refactoring.")
                 else:
-                    flog.log_failed_minimization(target.name, checker, index + 1, executed_specimin_cmd)
+                    logger.log_failed_minimization(target.name, checker, index + 1, executed_specimin_cmd)
                     print("Minimization failed. See failed_minimizations.jsonl in the run's log directory.")
                     print(f"<====== Processing of error {index + 1} complete")
                     continue
@@ -89,15 +89,15 @@ def run(target: Target, checkers: list[str], flog: FailureLogger):
                 error_transposed = first((e for e in errors_in_minimized if e.likely_equals(error)), None)
 
                 if any(e.is_compilation_error() for e in errors_in_minimized):
-                    flog.log_failed_compilation(target.name, checker, index + 1,
-                                                executed_specimin_cmd, errors_in_minimized)
+                    logger.log_failed_compilation(target.name, checker, index + 1,
+                                                  executed_specimin_cmd, errors_in_minimized)
                     print(
                         "Minimization failed to produce compilable output. See failed_compilations.jsonl in the run's log directory.")
                     print(f"<====== Processing of error {index + 1} complete")
                     continue
                 elif not errors_in_minimized or not error_transposed:
-                    flog.log_failed_preservation(target.name, checker, index + 1,
-                                                 executed_specimin_cmd, error, errors_in_minimized)
+                    logger.log_failed_preservation(target.name, checker, index + 1,
+                                                   executed_specimin_cmd, error, errors_in_minimized)
                     print("Minimization failed to preserve. See failed_preservations.jsonl in the run's log directory.")
                     print(f"<====== Processing of error {index + 1} complete")
                     continue
@@ -108,19 +108,19 @@ def run(target: Target, checkers: list[str], flog: FailureLogger):
                                       diff_tester)
                 result = agent.run()
 
-                flog.log_refactor_result(target.name, checker, index + 1, result, executed_specimin_cmd)
+                logger.log_refactor_result(target.name, checker, index + 1, result, executed_specimin_cmd)
 
-                flog.log_success(target.name, checker, index + 1)
+                logger.log_success(target.name, checker, index + 1)
                 print(f"<====== Processing of error {index + 1} complete")
 
             except Exception as exc:
-                flog.log_crash(scope="error", target_name=target.name, exc=exc,
-                               checker=checker, index=index + 1)
+                logger.log_crash(scope="error", target_name=target.name, exc=exc,
+                                 checker=checker, index=index + 1)
                 print(f"Unhandled exception while processing error {index + 1}: {exc}. See crashes.jsonl. Continuing.")
                 print(f"<====== Processing of error {index + 1} complete (with exception)")
                 continue
 
-    flog.finish_target(target.name)
+    logger.finish_target(target.name)
 
 
 def main():
@@ -164,22 +164,22 @@ def main():
     checker_framework.setup()
     differential_tester.setup()
 
-    flog = FailureLogger()
+    logger = FPMinerLogger()
 
     for target in targets:
         print(f"============================ Running for {target.name} ============================")
         print()
 
         try:
-            run(target, checkers, flog)
+            run(target, checkers, logger)
         except Exception as exc:
-            flog.log_crash(scope="target", target_name=target.name, exc=exc)
+            logger.log_crash(scope="target", target_name=target.name, exc=exc)
             print(f"Unhandled exception while running target {target.name}: {exc}. See crashes.jsonl. Continuing.")
 
         print(f"============================ Finished run for {target.name} ============================")
         print()
 
-    flog.finalize()
+    logger.finalize()
 
 
 @dataclass

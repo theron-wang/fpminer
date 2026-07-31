@@ -96,6 +96,6 @@ def _clone_target(target_name: str, target_url: str):
     clone_to = Path("targets") / target_name
 
     subprocess.run(
-        ["git", "clone", target_url, clone_to, "-b", "master", "--depth", "1"],
+        ["git", "clone", target_url, clone_to, "--depth", "1"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
     )

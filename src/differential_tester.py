@@ -9,7 +9,8 @@ import regex
 from utils import run_git_reset_hard
 
 DIFF_TEST_REPO_URL = "https://github.com/musta55/Differential-Fuzz-Testing.git"
-DIFF_TEST_DIR = "diff_test"
+DIFF_TEST_DIR = "tools/diff_test"
+DIFF_TEST_WRAPPER = Path("scripts/diff_test_wrapper.sh").resolve()
 
 POM_NS = "http://maven.apache.org/POM/4.0.0"
 
@@ -164,21 +165,27 @@ class DifferentialTester:
         :param modified_dir: The directory to test against (the "refactored")
         :return: The result of the test, along with an error message if applicable
         """
-        result = subprocess.run(
-            ["python3", "run.py", self.target_name, "--original", str(self.original_dir.resolve()), "--refactored",
+
+        # We use a bash script around the differential test fuzzer because something with
+        # output redirection, if we call its script directly, causes the subprocess to crash
+        # with exit code 130 or hang indefinitely.
+        proc = subprocess.run(
+            [str(DIFF_TEST_WRAPPER), self.target_name, str(self.original_dir.resolve()),
              str(modified_dir.resolve())],
             cwd=DIFF_TEST_DIR,
             capture_output=True,
-            text=True
+            text=True,
+            start_new_session=True,
+            stdin=subprocess.DEVNULL
         )
 
-        if result.returncode != 0:
+        if proc.returncode != 0:
             return DifferentialTestResult.INCONCLUSIVE, ""
 
-        if "EQUIVALENT=1" in result.stdout:
+        if "EQUIVALENT=1" in proc.stdout:
             return DifferentialTestResult.SUCCESS, ""
 
-        fuzz_report_path = Path(regex.match(r"->\s*(?P<report>.*)", result.stdout).group("report"))
+        fuzz_report_path = Path(regex.match(r"->\s*(?P<report>.*)", proc.stdout).group("report"))
 
         result = read_fuzz_report(fuzz_report_path)
 
@@ -187,7 +194,8 @@ class DifferentialTester:
         elif len(result) == 0:
             # This is technically successful, since this means all methods are the same between the two.
             # Since this is used by refactor_agent anyway, the checker will not pass if no changes have
-            # been made, so this isn't a problem
+            # been made, so this isn't a problem (or this is an annotation-only change, and it will be
+            # handled elsewhere anyway)
             return DifferentialTestResult.SUCCESS, ""
 
         status, reasoning = result[0]

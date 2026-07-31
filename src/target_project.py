@@ -44,11 +44,10 @@ def _build_gradle_jar(directory: Path):
 
 class TargetProject:
     """Represents a target repository and its checker-specific workspaces."""
-    active_checker: str
     errors: list[CheckerError]
     build_file: Path
 
-    def __init__(self, target_name: str, target_url: str):
+    def __init__(self, target_name: str, target_url: str, checker: str):
         """
         Initialize target metadata and detect its build system file.
 
@@ -58,6 +57,9 @@ class TargetProject:
         self.target_name = target_name
         self.target_url = target_url
         self.base_dir = Path(f"targets/{target_name}")
+        self.active_checker = ""
+
+        self.checkout_workspace(checker, checker)
 
     def checkout_workspace(self, checker: str, checker_template: str) -> Path:
         """
@@ -67,6 +69,10 @@ class TargetProject:
         :param checker_template: The template to use for the checker.
         :return: The path to the workspace.
         """
+        repo_dir = Path(f"workspace/{self.target_name}/{checker}/{self.target_name}")
+
+        if self.active_checker == checker:
+            return repo_dir
 
         # This is ok to call on each checker. dljc is not an expensive call, and AnalysisAgent
         # only runs once per target project; subsequent calls to this will use the known checker
@@ -85,8 +91,6 @@ class TargetProject:
         self.build_file = build_file
         self.errors = errors
         self.active_checker = checker
-
-        repo_dir = Path(f"workspace/{self.target_name}/{checker}/{self.target_name}")
 
         if os.path.exists(repo_dir):
             return repo_dir

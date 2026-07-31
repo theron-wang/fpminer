@@ -15,10 +15,18 @@ from minisweagent.models.litellm_model import LitellmModel
 from tree_sitter import Language, Parser
 from utils import CheckerError, parse_errors_from_checker_output
 
-LOGS_ROOT = Path("analysis_agent_logs")
-
 
 def run_analysis_agent(target_name: str, target_url: str, tool_name: str, tool_url: str) -> list[CheckerError]:
+    # Run AnalysisAgent in a different directory, since its output is messy
+    current_dir = os.curdir
+    try:
+        os.chdir(os.path.join(current_dir, "analysis_agent"))
+        return _run_analysis_agent(target_name, target_url, tool_name, tool_url)
+    finally:
+        os.chdir(current_dir)
+
+
+def _run_analysis_agent(target_name: str, target_url: str, tool_name: str, tool_url: str) -> list[CheckerError]:
     success = True
 
     print(f"Running AnalysisAgent on {target_name} with tool {tool_name}")
@@ -42,8 +50,7 @@ def run_analysis_agent(target_name: str, target_url: str, tool_name: str, tool_u
             cycle_budget=40,
             mode="auto",
             time_limit_seconds=10800,
-            enable_exit_attempt=False,
-            logs_root=LOGS_ROOT
+            enable_exit_attempt=False
         )
 
     if not success:

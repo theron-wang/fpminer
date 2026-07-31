@@ -29,7 +29,7 @@ def _find_and_diff_changed_file(orig_dir: Path, modified_dir: Path) -> tuple[str
 
         if not filecmp.cmp(orig_file, modified_file, shallow=False):
             changed_file = (orig_file, modified_file)
-            break  # trees are identical, so there's exactly one — stop here
+            break  # trees are identical, so there's exactly one - stop here
 
     if changed_file is None:
         raise ValueError(

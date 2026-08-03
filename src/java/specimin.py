@@ -11,16 +11,14 @@ DOWNLOAD_TO = Path("tools/specimin")
 
 def setup():
     if os.getenv("SPECIMIN"):
-        print("Specimin already exists: using local copy")
         return
 
     if os.path.exists(DOWNLOAD_TO):
-        print("Specimin already exists: pulling most recent changes")
         subprocess.run(
             ["git", "pull"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=DOWNLOAD_TO)
         return
-    print("Cloning Specimin from GitHub")
+
     subprocess.run(
         ["git", "clone", SPECIMIN_URL, DOWNLOAD_TO, "--depth", "1"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
@@ -85,7 +83,6 @@ def minimize(error: CheckerError, targets: list[str], nullaway: bool, target_pro
 
     cmd = shlex.join(["./gradlew", "run", f"--args={specimin_args_as_str}"])
     if os.path.exists(output_dir):
-        print("Already minimized. Skipping.")
         return True, cmd
 
     result = subprocess.run(["./gradlew", "run", f"--args={specimin_args_as_str}", "-PskipCheckerFramework"],

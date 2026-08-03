@@ -2,6 +2,7 @@ import os
 import re
 import subprocess
 from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 
 from attr import dataclass
@@ -51,7 +52,8 @@ def _split_message(message: str) -> tuple[str, set[str] | None]:
 
 
 def run_git_reset_hard(directory: Path):
-    subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=directory)
+    subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=directory, stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL)
 
 
 def replace_in_uncommitted_changes(search: str, replace: str, repo: Path = Path(".")):
@@ -144,6 +146,10 @@ def whitespace_flexible_pattern(s: str) -> re.Pattern:
         return re.compile(re.escape(s))
     pattern = r"\s+".join(re.escape(tok) for tok in tokens)
     return re.compile(pattern)
+
+
+def timestamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 @dataclass

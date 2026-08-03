@@ -16,9 +16,7 @@ DLJC_BUILD_COMMANDS = [
 
 
 def run_dljc(target_name: str, target_url: str, tool_name: str) -> list[CheckerError]:
-    if os.path.exists(f"targets/{target_name}"):
-        print(f"Target {target_name} already exists, skipping cloning")
-    else:
+    if not os.path.exists(f"targets/{target_name}"):
         _clone_target(target_name, target_url)
 
     # dljc needs this

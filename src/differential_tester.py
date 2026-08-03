@@ -21,12 +21,10 @@ def setup():
         # Reset first in case diff test directory changes were not cleaned up properly
         run_git_reset_hard(Path(DIFF_TEST_DIR))
 
-        print("Differential tester already exists: pulling most recent changes")
         subprocess.run(
             ["git", "pull"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=DIFF_TEST_DIR)
         return
-    print("Cloning Differential-Fuzz-Testing from GitHub")
     subprocess.run(
         ["git", "clone", DIFF_TEST_REPO_URL, DIFF_TEST_DIR, "--depth", "1"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
@@ -111,8 +109,8 @@ def _format_maven_profile(jar_path: Path, target_name: str) -> str:
 
 
 class DifferentialTestResult(Enum):
-    SUCCESS = 0
-    FAILURE = 1
+    EQUIVALENT = 0
+    NOT_EQUIVALENT = 1
     INCONCLUSIVE = 2
 
 
@@ -175,15 +173,14 @@ class DifferentialTester:
             cwd=DIFF_TEST_DIR,
             capture_output=True,
             text=True,
-            start_new_session=True,
-            stdin=subprocess.DEVNULL
+            start_new_session=True
         )
 
         if proc.returncode != 0:
             return DifferentialTestResult.INCONCLUSIVE, ""
 
         if "EQUIVALENT=1" in proc.stdout:
-            return DifferentialTestResult.SUCCESS, ""
+            return DifferentialTestResult.EQUIVALENT, ""
 
         fuzz_report_path = Path(regex.match(r"->\s*(?P<report>.*)", proc.stdout).group("report"))
 
@@ -196,11 +193,11 @@ class DifferentialTester:
             # Since this is used by refactor_agent anyway, the checker will not pass if no changes have
             # been made, so this isn't a problem (or this is an annotation-only change, and it will be
             # handled elsewhere anyway)
-            return DifferentialTestResult.SUCCESS, ""
+            return DifferentialTestResult.EQUIVALENT, ""
 
         status, reasoning = result[0]
 
         if status == "DIVERGENT":
-            return DifferentialTestResult.FAILURE, reasoning
+            return DifferentialTestResult.NOT_EQUIVALENT, reasoning
         else:
             return DifferentialTestResult.INCONCLUSIVE, ""

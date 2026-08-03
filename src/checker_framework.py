@@ -29,15 +29,11 @@ def setup():
     if os.path.exists(DOWNLOAD_TO):
         return
 
-    print("Downloading the Checker Framework.")
-
     zip_bytes = _download(CHECKER_FRAMEWORK_URL)
 
     os.makedirs(DOWNLOAD_TO, exist_ok=True)
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         zf.extractall(DOWNLOAD_TO)
-
-    print("Successfully downloaded the Checker Framework.")
 
 
 def get_path_to_dljc() -> Path:

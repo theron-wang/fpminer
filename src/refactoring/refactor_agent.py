@@ -66,8 +66,13 @@ class RefactorAgentRun:
     differential_test_result: DifferentialTestResult = DifferentialTestResult.INCONCLUSIVE
     success: bool = False
     possible: bool = False
-    error: str | None = None
-    not_possible_reason: str | None = None
+    error: str = ""
+
+
+class RefactorAgentTermination(Exception):
+    """Special exception to end the session, since PydanticAI doesn't provide a clear
+    way to do so."""
+    pass
 
 
 class RefactorAgent:
@@ -127,7 +132,7 @@ class RefactorAgent:
         self.possible = True
         self.differential_test_result = DifferentialTestResult.INCONCLUSIVE
         self.finish_attempts = 0
-        self.not_possible_reason = None
+        self.error_reason = None
 
         @self.agent.tool
         def run_checker(ctx: RunContext[None]) -> str:
@@ -263,20 +268,14 @@ class RefactorAgent:
                     preserving fix exists - what you tried or considered, and
                     specifically what behavior would have to change and for
                     which inputs.
-
-            Returns:
-                JSON string: {"finished": true, "possible": false, "reason": str}
             """
             GLOBAL_MODEL_RATE_LIMITER.acquire()
 
             self.finished = True
             self.possible = False
-            self.not_possible_reason = reason
-            return json.dumps({
-                "finished": True,
-                "possible": False,
-                "reason": reason,
-            })
+            self.error_reason = reason
+
+            raise RefactorAgentTermination()
 
         @self.agent.tool
         def finish(ctx: RunContext[None]) -> str:
@@ -307,17 +306,9 @@ class RefactorAgent:
                 if self.finish_attempts >= MAX_FINISH_ATTEMPTS:
                     self.finished = True
                     self.success = False
+                    self.error_reason = "Checker errors still present but maximum finish attempts reached."
 
-                    return json.dumps({
-                        "finished": True,
-                        "success": False,
-                        "error_count": len(errors),
-                        "errors": errors,
-                        "message": (
-                            "Maximum finish attempts exceeded. The session is now "
-                            "being forcibly ended without a resolved target error."
-                        ),
-                    })
+                    raise RefactorAgentTermination()
 
                 return json.dumps({
                     "finished": False,
@@ -338,12 +329,19 @@ class RefactorAgent:
                 # equivalent, always. Differential-Test-Fuzzer only skips cases where the
                 # _text_ of two methods is exactly equivalent, so we can bail out on cases
                 # we know will yield SUCCESS and save a minute.
-                diff_test_result = DifferentialTestResult.SUCCESS
+                diff_test_result = DifferentialTestResult.EQUIVALENT
                 message = ""
             else:
                 diff_test_result, message = self.differential_tester.check_semantic_equivalence(self.diff_testing_dir)
 
-            if diff_test_result == DifferentialTestResult.FAILURE:
+            if diff_test_result == DifferentialTestResult.NOT_EQUIVALENT:
+                if self.finish_attempts >= MAX_FINISH_ATTEMPTS:
+                    self.finished = True
+                    self.success = False
+                    self.error_reason = "Checker errors resolved, but the method is not semantically equivalent to the original. Maximum finish attempts reached."
+
+                    raise RefactorAgentTermination()
+
                 return json.dumps({
                     "finished": False,
                     "success": False,
@@ -363,15 +361,9 @@ class RefactorAgent:
                 })
 
             self.finished = True
-            self.success = diff_test_result == DifferentialTestResult.SUCCESS
+            self.success = diff_test_result == DifferentialTestResult.EQUIVALENT
             self.differential_test_result = diff_test_result
-            return json.dumps({
-                "finished": True,
-                "success": self.success,
-                "error_count": 0,
-                "errors": [],
-                "message": "Session complete.",
-            })
+            raise RefactorAgentTermination()
 
     def run(self) -> RefactorAgentRun:
         """
@@ -383,12 +375,15 @@ class RefactorAgent:
 
         try:
             self._run_sync_with_rate_limit_retry(initial_prompt)
+        except RefactorAgentTermination:
+            # Session completed when we wanted it to
+            pass
         except Exception as e:
-            result.modified_content = self._get_original_target_method_content()
-            result.error = f"Agent run failed or exhausted limits: {e}"
+            result.modified_content = self._get_current_target_method_content()
+            result.error = f"Agent run failed or exhausted limits: {type(e).__name__}: {e}"
             return result
 
-        result.modified_content = self._get_original_target_method_content()
+        result.modified_content = self._get_current_target_method_content()
         result.differential_test_result = self.differential_test_result
 
         # agent.run() returned normally, but that doesn't guarantee finish
@@ -401,7 +396,7 @@ class RefactorAgent:
         else:
             result.success = self.success
             result.possible = self.possible
-            result.not_possible_reason = self.not_possible_reason
+            result.error = self.error_reason
 
         return result
 

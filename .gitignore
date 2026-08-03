@@ -29,7 +29,7 @@ MANIFEST
 .idea/
 *.iml
 
-run_logs/
+results/
 targets/
 workspace/
 tools/

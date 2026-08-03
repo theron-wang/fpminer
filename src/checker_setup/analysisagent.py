@@ -29,11 +29,7 @@ def run_analysis_agent(target_name: str, target_url: str, tool_name: str, tool_u
 def _run_analysis_agent(target_name: str, target_url: str, tool_name: str, tool_url: str) -> list[CheckerError]:
     success = True
 
-    print(f"Running AnalysisAgent on {target_name} with tool {tool_name}")
-
-    if os.path.exists(_get_target_directory(target_name)):
-        print(f"Target {target_name} already exists, skipping")
-    else:
+    if not os.path.exists(_get_target_directory(target_name)):
         model = LitellmModel(model_name=os.environ["EXEC_AGENT_MODEL"])
         env = LocalEnvironment(
             cwd="analysis_agent_workspace",
@@ -58,10 +54,7 @@ def _run_analysis_agent(target_name: str, target_url: str, tool_name: str, tool_
 
     # AnalysisAgent automatically cleans up the Docker container after execution,
     # so we need to reconstruct the output
-    print(f"Reconstructing output for target {target_name} with tool {tool_name}")
     checker_output = _reconstruct(target_name, tool_name, f"targets/{target_name}")
-    print("Reconstruction complete.")
-    print()
 
     return parse_errors_from_checker_output(checker_output)
 

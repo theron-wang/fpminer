@@ -5,25 +5,20 @@ import logging
 import sys
 import threading
 import traceback
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 from refactoring.refactor_agent import RefactorAgentRun
-from utils import CheckerError
+from utils import CheckerError, timestamp
 
 LOGGER_LEVEL = logging.INFO
-
-
-def _timestamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 class FPMinerLogger:
     """
     Centralized, file-based logger for the fpminer pipeline.
 
-    Creates a per-run directory under `run_logs/` containing:
+    Creates a per-run directory under `results/` containing:
       - run.log                     human-readable log of everything (DEBUG+ to file,
                                      INFO+ to console), including full tracebacks
       - failed_minimizations.jsonl  one JSON record per failed minimization
@@ -54,9 +49,9 @@ class FPMinerLogger:
     multiple threads on its own.
     """
 
-    def __init__(self, run_id: Optional[str] = None):
-        self.run_id = run_id or _timestamp()
-        self.run_dir = Path("run_logs") / f"run_{self.run_id}"
+    def __init__(self, run_id: str):
+        self.run_id = run_id
+        self.run_dir = Path("results") / f"run_{self.run_id}" / "logs"
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
         self._lock = threading.Lock()
@@ -117,7 +112,7 @@ class FPMinerLogger:
             self._counts[key] += amount
 
     def _append_jsonl(self, filename: str, record: dict[str, Any]) -> None:
-        record = {"timestamp": _timestamp(), **record}
+        record = {"timestamp": timestamp(), **record}
         path = self.run_dir / filename
         line = json.dumps(record, default=str) + "\n"
         try:
@@ -200,7 +195,7 @@ class FPMinerLogger:
         success = run.success
         possible = run.possible
         error_msg = run.error
-        not_possible_reason = run.not_possible_reason
+        not_possible_reason = run.error
 
         self._increment("refactor_runs")
         if error_msg:
@@ -238,7 +233,7 @@ class FPMinerLogger:
         self._append_text_block(
             "refactor_results.log",
             header=(
-                f"[{_timestamp()}] {target_name}/{checker} — error {index} — "
+                f"[{timestamp()}] {target_name}/{checker} — error {index} — "
                 f"REFACTOR RESULT (success={success}, possible={possible})"
             ),
             sections=[
@@ -271,7 +266,7 @@ class FPMinerLogger:
         })
         self._append_text_block(
             "failed_minimizations.log",
-            header=f"[{_timestamp()}] {target_name}/{checker} — error {index} — FAILED MINIMIZATION",
+            header=f"[{timestamp()}] {target_name}/{checker} — error {index} — FAILED MINIMIZATION",
             sections=[("Command", specimin_cmd)],
         )
 
@@ -300,7 +295,7 @@ class FPMinerLogger:
         })
         self._append_text_block(
             "failed_compilations.log",
-            header=f"[{_timestamp()}] {target_name}/{checker} — error {index} — FAILED COMPILATION",
+            header=f"[{timestamp()}] {target_name}/{checker} — error {index} — FAILED COMPILATION",
             sections=[
                 ("Command", specimin_cmd),
                 ("Compilation errors", "\n".join(compilation_errors) if compilation_errors else None),
@@ -335,7 +330,7 @@ class FPMinerLogger:
         })
         self._append_text_block(
             "failed_preservations.log",
-            header=f"[{_timestamp()}] {target_name}/{checker} — error {index} — FAILED PRESERVATION",
+            header=f"[{timestamp()}] {target_name}/{checker} — error {index} — FAILED PRESERVATION",
             sections=[
                 ("Command", specimin_cmd),
                 ("Expected", expected_raw),
@@ -386,7 +381,7 @@ class FPMinerLogger:
         self._append_text_block(
             "crashes.log",
             header=(
-                f"[{_timestamp()}] {target_name}"
+                f"[{timestamp()}] {target_name}"
                 f"{f'/{checker}' if checker else ''} — {f'error {index} — ' if index is not None else ''}"
                 f"CRASH at '{scope}' level: {type(exc).__name__}"
             ),

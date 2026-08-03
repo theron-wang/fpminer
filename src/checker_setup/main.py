@@ -18,14 +18,12 @@ def setup_checker(target_name: str, target_url: str, tool_name: str) -> list[Che
     :param tool_name: The tool name
     :return: The command to run the checker, or None if all failed
     """
-    print(f"Setting up checker {tool_name} for target {target_name}")
 
     already_existed = os.path.exists(f"targets/{target_name}")
 
     errors = run_dljc(target_name, target_url, tool_name)
 
     if errors:
-        print(f"DLJC succeeded for target {target_name} with tool {tool_name}")
         return errors
 
     # dljc.py automatically clones the project. If the repository was already cloned before
@@ -34,13 +32,4 @@ def setup_checker(target_name: str, target_url: str, tool_name: str) -> list[Che
     if not already_existed:
         shutil.rmtree(f"targets/{target_name}")
 
-    print(f"DLJC failed for target {target_name} with tool {tool_name}, trying AnalysisAgent")
-
-    errors = run_analysis_agent(target_name, target_url, tool_name, CF_URL)
-
-    if errors:
-        print(f"AnalysisAgent succeeded for target {target_name} with tool {tool_name}")
-        return errors
-
-    print(f"AnalysisAgent failed for target {target_name} with tool {tool_name}")
-    return None
+    return run_analysis_agent(target_name, target_url, tool_name, CF_URL)

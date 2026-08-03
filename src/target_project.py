@@ -36,7 +36,8 @@ def _build_gradle_jar(directory: Path):
         subprocess.run(
             ["./gradlew", "-I", "fpminer-fatjar.gradle", "fpMinerFatJar"],
             cwd=directory,
-            check=True
+            check=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
     finally:
         init_script.unlink(missing_ok=True)

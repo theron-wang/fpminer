@@ -7,6 +7,7 @@ import subprocess
 from dataclasses import dataclass
 from multiprocessing.pool import Pool
 from pathlib import Path
+from typing import Literal
 
 import argparse
 import checker_framework
@@ -18,7 +19,7 @@ from java.java_parser import get_target_signature_and_modularity_model
 from logger import FPMinerLogger
 from more_itertools import first
 from refactoring import refactor_result_handler
-from refactoring.refactor_agent import RefactorAgent
+from refactoring.refactor_agent import RefactorAgent, RefactorAgentRun
 from target_project import TargetProject
 from utils import run_checker_and_parse_errors, CheckerError
 
@@ -39,6 +40,58 @@ def ensure_posix_and_docker():
         exit(1)
 
 
+@dataclass
+class ProcessResult:
+    """Picklable summary of one process_one_error() run.
+
+    Workers never touch FPMinerLogger (its `_lock` can't be pickled), so
+    each worker returns one of these instead, and the main process turns it
+    into the appropriate logger.log_*() call(s) via _log_result().
+    """
+    index: int
+    outcome: Literal["skipped", "failed_minimization", "failed_compilation", "failed_preservation", "success", "crash"]
+    targets_fields: list[str] | None = None
+    specimin_cmd: str = ""
+    errors_in_minimized: list[CheckerError] | None = None
+    expected_error: CheckerError | None = None
+    refactor_run: RefactorAgentRun | None = None
+    exc: BaseException | None = None
+
+
+def _log_result(logger: FPMinerLogger, project: TargetProject, result: ProcessResult) -> None:
+    """Runs only in the main process. Dispatches a completed worker's
+    ProcessResult to the matching FPMinerLogger call(s), as each result
+    streams back from the pool -- so logging happens as errors finish
+    processing, not all at once at the end."""
+    target_name = project.target_name
+    checker = project.active_checker
+    index = result.index
+
+    # Preserves the original per-error "start" log entry / counter increment;
+    # it now fires when a result comes back rather than before it's dispatched,
+    # since imap_unordered doesn't give us a hook before work begins.
+    logger.log_error_start(target_name, checker, index, len(project.errors))
+
+    if result.outcome == "skipped":
+        logger.log_skipped_error(target_name, result.targets_fields or [], checker, index)
+    elif result.outcome == "failed_minimization":
+        logger.log_failed_minimization(target_name, checker, index, result.specimin_cmd)
+    elif result.outcome == "failed_compilation":
+        logger.log_failed_compilation(target_name, checker, index, result.specimin_cmd,
+                                      result.errors_in_minimized)
+    elif result.outcome == "failed_preservation":
+        logger.log_failed_preservation(target_name, checker, index, result.specimin_cmd,
+                                       result.expected_error, result.errors_in_minimized)
+    elif result.outcome == "success":
+        logger.log_refactor_result(target_name, checker, index, result.refactor_run, result.specimin_cmd)
+        logger.log_success(target_name, checker, index)
+    elif result.outcome == "crash":
+        logger.log_crash(scope="error", target_name=target_name, exc=result.exc,
+                         checker=checker, index=index)
+    else:
+        logger.logger.error("Unknown ProcessResult outcome %r for error %d", result.outcome, index)
+
+
 def run(target: Target, checkers: list[str], logger: FPMinerLogger):
     """Process one target repository against all configured checkers."""
     logger.start_target(target.name)
@@ -57,20 +110,27 @@ def run(target: Target, checkers: list[str], logger: FPMinerLogger):
         repo_dir = project.checkout_workspace(checker, checkers[0])
 
         with Pool(processes=int(os.getenv("MAX_PROCESSES", os.cpu_count() or 1))) as pool:
-            pool.starmap(process_one_error,
-                         [(i, e, project, logger, repo_dir, diff_tester) for i, e in enumerate(project.errors)])
-
-            pool.close()
-            pool.join()
+            args = [(i, e, project, repo_dir, diff_tester) for i, e in enumerate(project.errors)]
+            # imap_unordered streams results back as each task finishes (in
+            # completion order, not submission order), so we can log
+            # incrementally instead of waiting for the whole batch like
+            # starmap did.
+            for result in pool.imap_unordered(_process_one_error_star, args):
+                _log_result(logger, project, result)
 
     logger.finish_target(target.name)
 
 
-def process_one_error(index: int, error: CheckerError, project: TargetProject, logger: FPMinerLogger, repo_dir: Path,
-                      diff_tester: DifferentialTester):
+def _process_one_error_star(args: tuple) -> ProcessResult:
+    """imap_unordered passes a single argument per call; unpack the tuple here
+    since process_one_error still takes positional args (kept from starmap)."""
+    return process_one_error(*args)
+
+
+def process_one_error(index: int, error: CheckerError, project: TargetProject, repo_dir: Path,
+                      diff_tester: DifferentialTester) -> ProcessResult:
     print()
     print(f"Beginning processing of error {index + 1} / {len(project.errors)} ======>")
-    logger.log_error_start(project.target_name, project.active_checker, index + 1, len(project.errors))
 
     try:
         targets, nullaway = get_target_signature_and_modularity_model(repo_dir, error)
@@ -78,9 +138,8 @@ def process_one_error(index: int, error: CheckerError, project: TargetProject, l
         if not any(t for t in targets if '(' in t):
             # Targeting only fields means that the code is likely not interesting.
             print(f"Error {index + 1} only targets fields. Skipping.")
-            logger.log_skipped_error(project.target_name, targets, project.active_checker, index + 1)
             print(f"<====== Processing of error {index + 1} complete")
-            return
+            return ProcessResult(index=index + 1, outcome="skipped", targets_fields=targets)
 
         specimin_output = repo_dir.parent / str(index + 1) / "orig"
         min_successful, executed_specimin_cmd = specimin.minimize(
@@ -90,11 +149,10 @@ def process_one_error(index: int, error: CheckerError, project: TargetProject, l
         if min_successful:
             print("Minimization successful. Proceeding to refactoring.")
         else:
-            logger.log_failed_minimization(project.target_name, project.active_checker, index + 1,
-                                           executed_specimin_cmd)
             print("Minimization failed. See failed_minimizations.jsonl in the run's log directory.")
             print(f"<====== Processing of error {index + 1} complete")
-            return
+            return ProcessResult(index=index + 1, outcome="failed_minimization",
+                                 specimin_cmd=executed_specimin_cmd)
 
         checker_cmd = checker_framework.get_command_for_checker(project.active_checker, specimin_output)
         errors_in_minimized = run_checker_and_parse_errors(checker_cmd, specimin_output)
@@ -102,18 +160,19 @@ def process_one_error(index: int, error: CheckerError, project: TargetProject, l
         error_transposed = first((e for e in errors_in_minimized if e.likely_equals(error)), None)
 
         if any(e.is_compilation_error() for e in errors_in_minimized):
-            logger.log_failed_compilation(project.target_name, project.active_checker, index + 1,
-                                          executed_specimin_cmd, errors_in_minimized)
             print(
                 "Minimization failed to produce compilable output. See failed_compilations.jsonl in the run's log directory.")
             print(f"<====== Processing of error {index + 1} complete")
-            return
+            return ProcessResult(index=index + 1, outcome="failed_compilation",
+                                 specimin_cmd=executed_specimin_cmd,
+                                 errors_in_minimized=errors_in_minimized)
         elif not errors_in_minimized or not error_transposed:
-            logger.log_failed_preservation(project.target_name, project.active_checker, index + 1,
-                                           executed_specimin_cmd, error, errors_in_minimized)
             print("Minimization failed to preserve. See failed_preservations.jsonl in the run's log directory.")
             print(f"<====== Processing of error {index + 1} complete")
-            return
+            return ProcessResult(index=index + 1, outcome="failed_preservation",
+                                 specimin_cmd=executed_specimin_cmd,
+                                 expected_error=error,
+                                 errors_in_minimized=errors_in_minimized)
 
         other_errors = [e for e in errors_in_minimized if not e.likely_equals(error)]
 
@@ -122,19 +181,16 @@ def process_one_error(index: int, error: CheckerError, project: TargetProject, l
                               diff_tester)
         result = agent.run()
 
-        logger.log_refactor_result(project.target_name, project.active_checker, index + 1, result,
-                                   executed_specimin_cmd)
         refactor_result_handler.handle_refactor_result(result)
 
-        logger.log_success(project.target_name, project.active_checker, index + 1)
         print(f"<====== Processing of error {index + 1} complete")
+        return ProcessResult(index=index + 1, outcome="success",
+                             specimin_cmd=executed_specimin_cmd, refactor_run=result)
 
     except Exception as exc:
-        logger.log_crash(scope="error", target_name=project.target_name, exc=exc,
-                         checker=project.active_checker, index=index + 1)
         print(f"Unhandled exception while processing error {index + 1}: {exc}. See crashes.jsonl. Continuing.")
         print(f"<====== Processing of error {index + 1} complete (with exception)")
-        return
+        return ProcessResult(index=index + 1, outcome="crash", exc=exc)
 
 
 def main():

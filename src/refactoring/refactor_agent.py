@@ -7,6 +7,7 @@ from pathlib import Path
 import checker_framework
 from attr import dataclass
 from differential_tester import DifferentialTester, DifferentialTestResult
+from java.annotation_compare import are_changes_annotation_or_comment_only
 from java.java_parser import get_method_text_for_signature
 from pydantic_ai import Agent, UsageLimits, RunContext
 from refactoring.rate_limiter import GLOBAL_MODEL_RATE_LIMITER
@@ -60,8 +61,8 @@ def _is_rate_limit_or_service_unavailable_error(exc: BaseException) -> bool:
 
 @dataclass
 class RefactorAgentRun:
-    orig_dir: Path
-    modified_dir: Path
+    orig_content: str
+    modified_content: str = ""
     differential_test_result: DifferentialTestResult = DifferentialTestResult.INCONCLUSIVE
     success: bool = False
     possible: bool = False
@@ -331,7 +332,16 @@ class RefactorAgent:
                     ),
                 })
 
-            diff_test_result, message = self.differential_tester.check_semantic_equivalence(self.diff_testing_dir)
+            if are_changes_annotation_or_comment_only(self._get_original_target_method_content(),
+                                                      self._get_current_target_method_content()):
+                # If two methods only differ in annotations or comments, they are semantically
+                # equivalent, always. Differential-Test-Fuzzer only skips cases where the
+                # _text_ of two methods is exactly equivalent, so we can bail out on cases
+                # we know will yield SUCCESS and save a minute.
+                diff_test_result = DifferentialTestResult.SUCCESS
+                message = ""
+            else:
+                diff_test_result, message = self.differential_tester.check_semantic_equivalence(self.diff_testing_dir)
 
             if diff_test_result == DifferentialTestResult.FAILURE:
                 return json.dumps({
@@ -369,15 +379,18 @@ class RefactorAgent:
         """
         initial_prompt = self._build_initial_prompt()
 
-        result = RefactorAgentRun(self.orig_directory, self.modified_directory)
+        result = RefactorAgentRun(self._get_original_target_method_content())
 
         try:
             self._run_sync_with_rate_limit_retry(initial_prompt)
         except Exception as e:
+            result.modified_content = self._get_original_target_method_content()
             result.error = f"Agent run failed or exhausted limits: {e}"
             return result
 
+        result.modified_content = self._get_original_target_method_content()
         result.differential_test_result = self.differential_test_result
+
         # agent.run() returned normally, but that doesn't guarantee finish
         # or not_possible() was ever actually called - the model may have
         # just stopped producing tool calls.

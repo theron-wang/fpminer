@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import threading
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,7 +23,7 @@ class FPMinerLogger:
     """
     Centralized, file-based logger for the fpminer pipeline.
 
-    Creates a per-run directory under `logs/` containing:
+    Creates a per-run directory under `run_logs/` containing:
       - run.log                     human-readable log of everything (DEBUG+ to file,
                                      INFO+ to console), including full tracebacks
       - failed_minimizations.jsonl  one JSON record per failed minimization
@@ -43,12 +44,22 @@ class FPMinerLogger:
     All logging calls are defensive: if writing a log record itself fails, that
     failure is swallowed (and reported via the text logger) rather than being
     allowed to crash the pipeline.
+
+    Thread-safety: a single instance-level lock guards both the `_counts`
+    aggregate dict and every file write (`_append_jsonl`, `_append_text_block`,
+    `finalize`). Multiple threads may safely share one `FPMinerLogger`
+    instance and call any of its methods concurrently. `self.logger` itself
+    is not additionally guarded — the standard `logging` module already
+    serializes handler emission internally, so it's safe to call from
+    multiple threads on its own.
     """
 
-    def __init__(self, base_dir: str | Path = "logs", run_id: Optional[str] = None):
+    def __init__(self, run_id: Optional[str] = None):
         self.run_id = run_id or _timestamp()
-        self.run_dir = Path(base_dir) / f"run_{self.run_id}"
+        self.run_dir = Path("run_logs") / f"run_{self.run_id}"
         self.run_dir.mkdir(parents=True, exist_ok=True)
+
+        self._lock = threading.Lock()
 
         self._counts = {
             "targets_total": 0,
@@ -101,12 +112,18 @@ class FPMinerLogger:
     # ------------------------------------------------------------------ #
     # internal helpers
     # ------------------------------------------------------------------ #
+    def _increment(self, key: str, amount: int = 1) -> None:
+        with self._lock:
+            self._counts[key] += amount
+
     def _append_jsonl(self, filename: str, record: dict[str, Any]) -> None:
         record = {"timestamp": _timestamp(), **record}
         path = self.run_dir / filename
+        line = json.dumps(record, default=str) + "\n"
         try:
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, default=str) + "\n")
+            with self._lock:
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(line)
         except Exception:
             # Logging must never be allowed to crash the pipeline.
             self.logger.exception("Failed to write log record to %s", path)
@@ -130,9 +147,11 @@ class FPMinerLogger:
             lines.append("")
         lines.append("=" * 80)
         lines.append("")
+        block = "\n".join(lines) + "\n"
         try:
-            with open(path, "a", encoding="utf-8") as f:
-                f.write("\n".join(lines) + "\n")
+            with self._lock:
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(block)
         except Exception:
             self.logger.exception("Failed to write log record to %s", path)
 
@@ -140,22 +159,22 @@ class FPMinerLogger:
     # target / error lifecycle
     # ------------------------------------------------------------------ #
     def start_target(self, target_name: str) -> None:
-        self._counts["targets_total"] += 1
+        self._increment("targets_total")
         self.logger.info("%s Starting target: %s %s", "=" * 20, target_name, "=" * 20)
 
     def finish_target(self, target_name: str) -> None:
         self.logger.info("%s Finished target: %s %s", "=" * 20, target_name, "=" * 20)
 
     def log_error_start(self, target_name: str, checker: str, index: int, total: int) -> None:
-        self._counts["errors_total"] += 1
+        self._increment("errors_total")
         self.logger.info("[%s/%s] Processing error %d/%d", target_name, checker, index, total)
 
     def log_success(self, target_name: str, checker: str, index: int) -> None:
-        self._counts["succeeded"] += 1
+        self._increment("succeeded")
         self.logger.info("[%s/%s] Error %d: processed successfully.", target_name, checker, index)
 
     def log_skipped_error(self, target_name: str, targets_fields: list[str], checker: str, index: int):
-        self._counts["skipped"] += 1
+        self._increment("skipped")
         self.logger.info("[%s/%s] Error %d: skipped (targets fields: %s).", target_name, checker, index,
                          ", ".join(targets_fields))
 
@@ -183,13 +202,13 @@ class FPMinerLogger:
         error_msg = run.error
         not_possible_reason = run.not_possible_reason
 
-        self._counts["refactor_runs"] += 1
+        self._increment("refactor_runs")
         if error_msg:
-            self._counts["refactor_errored"] += 1
+            self._increment("refactor_errored")
         elif possible:
-            self._counts["refactor_fix_possible"] += 1
+            self._increment("refactor_fix_possible")
         elif not possible:
-            self._counts["refactor_fix_not_possible"] += 1
+            self._increment("refactor_fix_not_possible")
 
         if error_msg:
             self.logger.error(
@@ -239,10 +258,9 @@ class FPMinerLogger:
             index: int,
             specimin_cmd: str = "",
     ) -> None:
-        """Mirrors the old `add_to_failed_minimizations`: records the exact
-        Specimin invocation (the `./gradlew run --args=...` command) that
+        """Records the exact Specimin invocation (the `./gradlew run --args=...` command) that
         failed to minimize the error."""
-        self._counts["failed_minimizations"] += 1
+        self._increment("failed_minimizations")
         self.logger.warning("[%s/%s] Error %d: minimization failed. Command: %s",
                             target_name, checker, index, specimin_cmd)
         self._append_jsonl("failed_minimizations.jsonl", {
@@ -265,10 +283,9 @@ class FPMinerLogger:
             specimin_cmd: str = "",
             errors: list[CheckerError] | None = None,
     ) -> None:
-        """Mirrors the old `add_to_failed_compilations`: records the Specimin
-        command plus the raw text of every compilation error found in the
+        """Records the Specimin command plus the raw text of every compilation error found in the
         minimized output."""
-        self._counts["failed_compilations"] += 1
+        self._increment("failed_compilations")
         compilation_errors = [
             e.raw for e in (errors or []) if e.is_compilation_error()
         ]
@@ -299,10 +316,9 @@ class FPMinerLogger:
             expected: CheckerError | None = None,
             errors_in_minimized: list[CheckerError] | None = None,
     ) -> None:
-        """Mirrors the old `add_to_failed_preservations`: records the Specimin
-        command, the raw text of the expected error, and the raw text of every
+        """Records the Specimin command, the raw text of the expected error, and the raw text of every
         error actually observed in the minimized output."""
-        self._counts["failed_preservations"] += 1
+        self._increment("failed_preservations")
         expected_raw = expected.raw if expected is not None else None
         observed_raw = [e.raw for e in (errors_in_minimized or [])]
         self.logger.warning(
@@ -343,9 +359,9 @@ class FPMinerLogger:
         `scope` describes the granularity at which the exception was caught and
         recovered from, e.g. "target", "target_setup", or "error".
         """
-        self._counts["crashes"] += 1
+        self._increment("crashes")
         if scope in ("target", "target_setup"):
-            self._counts["targets_crashed"] += 1
+            self._increment("targets_crashed")
 
         tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
         self.logger.error(
@@ -386,8 +402,11 @@ class FPMinerLogger:
     def finalize(self) -> None:
         summary_path = self.run_dir / "summary.json"
         try:
-            with open(summary_path, "w", encoding="utf-8") as f:
-                json.dump(self._counts, f, indent=2)
+            with self._lock:
+                counts_snapshot = dict(self._counts)
+                with open(summary_path, "w", encoding="utf-8") as f:
+                    json.dump(counts_snapshot, f, indent=2)
         except Exception:
             self.logger.exception("Failed to write summary.json")
-        self.logger.info("Run complete. Summary: %s", self._counts)
+            return
+        self.logger.info("Run complete. Summary: %s", counts_snapshot)

@@ -17,6 +17,7 @@ SPECIMIN=(optional path to a local copy of Specimin)
 REFACTOR_AGENT_MODEL=model to use for refactoring (PydanticAI format: e.g., google:gemini-3-flash-preview)
 REFACTOR_AGENT_MAX_RPM=max requests per minute for refactoring agent
 CHECKER_FRAMEWORK_VERSION=the CF version to use
+MAX_PROCESSES=the maximum number of concurrent processes to run (default: os.cpu_count())
 ```
 
 ## Runtime requirements

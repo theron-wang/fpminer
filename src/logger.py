@@ -197,13 +197,20 @@ class FPMinerLogger:
             self.logger.exception("Failed to write log record to %s", path)
 
     # ------------------------------------------------------------------ #
-    # target / error lifecycle
+    # target / checker / error lifecycle
     # ------------------------------------------------------------------ #
     def start_target(self, target_name: str) -> None:
         self.logger.info("%s Starting target: %s %s", "=" * 20, target_name, "=" * 20)
 
     def finish_target(self, target_name: str) -> None:
         self.logger.info("%s Finished target: %s %s", "=" * 20, target_name, "=" * 20)
+
+    def start_checker(self, target_name: str, checker: str) -> None:
+        self._bump(target_name, checker, "errors_total", amount=0)
+        self.logger.info("%s Starting checker: %s %s", "=" * 20, checker, "=" * 20)
+
+    def finish_checker(self, checker: str) -> None:
+        self.logger.info("%s Finished checker: %s %s", "=" * 20, checker, "=" * 20)
 
     def log_error_start(self, target_name: str, checker: str, index: int, total: int) -> None:
         self._bump(target_name, checker, "errors_total")

@@ -109,6 +109,7 @@ def run(run_id: str, target: Target, checkers: list[str], logger: FPMinerLogger)
     diff_tester = DifferentialTester(jar_path, project.base_dir, target.name)
 
     for checker in checkers:
+        logger.start_checker(target.name, checker)
         repo_dir = project.checkout_workspace(checker, checkers[0])
         result_handler = RefactorResultHandler(run_id, target.name, checker)
         with Pool(processes=int(os.getenv("MAX_PROCESSES", os.cpu_count() or 1))) as pool:
@@ -119,6 +120,7 @@ def run(run_id: str, target: Target, checkers: list[str], logger: FPMinerLogger)
 
                 if result.refactor_run:
                     result_handler.handle_refactor_result(result.refactor_run, result.index)
+        logger.finish_checker(checker)
 
     logger.finish_target(target.name)
 

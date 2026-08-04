@@ -5,7 +5,7 @@ import json
 import os
 import subprocess
 from dataclasses import dataclass
-from multiprocessing.pool import Pool
+from multiprocessing import Pool
 from pathlib import Path
 from typing import Literal
 
@@ -83,9 +83,11 @@ def _log_result(logger: FPMinerLogger, project: TargetProject, result: ProcessRe
         logger.log_failed_preservation(target_name, checker, index, result.specimin_cmd,
                                        result.expected_error, result.errors_in_minimized)
     elif result.outcome == "success":
-        logger.log_refactor_result(target_name, checker, index, result.refactor_run, result.specimin_cmd)
+        assert result.refactor_run is not None
+        logger.log_refactor_result(target_name, checker, index, result.refactor_run)
         logger.log_success(target_name, checker, index)
     elif result.outcome == "crash":
+        assert result.exc is not None
         logger.log_crash(scope="error", target_name=target_name, exc=result.exc,
                          checker=checker, index=index)
     else:
@@ -109,7 +111,6 @@ def run(run_id: str, target: Target, checkers: list[str], logger: FPMinerLogger)
     for checker in checkers:
         repo_dir = project.checkout_workspace(checker, checkers[0])
         result_handler = RefactorResultHandler(run_id, target.name, checker)
-
         with Pool(processes=int(os.getenv("MAX_PROCESSES", os.cpu_count() or 1))) as pool:
             args = [(i, e, project, repo_dir, diff_tester) for i, e in enumerate(project.errors)]
 
@@ -117,7 +118,7 @@ def run(run_id: str, target: Target, checkers: list[str], logger: FPMinerLogger)
                 _log_result(logger, project, result)
 
                 if result.refactor_run:
-                    result_handler.handle_refactor_result(result.refactor_run)
+                    result_handler.handle_refactor_result(result.refactor_run, result.index)
 
     logger.finish_target(target.name)
 

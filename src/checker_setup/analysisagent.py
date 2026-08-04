@@ -15,10 +15,13 @@ from minisweagent.models.litellm_model import LitellmModel
 from tree_sitter import Language, Parser
 from utils import CheckerError, parse_errors_from_checker_output
 
+LOGS_ROOT = Path("analysis_agent_logs")
 
-def run_analysis_agent(target_name: str, target_url: str, tool_name: str, tool_url: str) -> list[CheckerError]:
+
+def run_analysis_agent(target_name: str, target_url: str, tool_name: str, tool_url: str) -> list[CheckerError] | None:
     # Run AnalysisAgent in a different directory, since its output is messy
     current_dir = os.curdir
+    os.makedirs("analysis_agent", exist_ok=True)
     try:
         os.chdir(os.path.join(current_dir, "analysis_agent"))
         return _run_analysis_agent(target_name, target_url, tool_name, tool_url)
@@ -26,7 +29,7 @@ def run_analysis_agent(target_name: str, target_url: str, tool_name: str, tool_u
         os.chdir(current_dir)
 
 
-def _run_analysis_agent(target_name: str, target_url: str, tool_name: str, tool_url: str) -> list[CheckerError]:
+def _run_analysis_agent(target_name: str, target_url: str, tool_name: str, tool_url: str) -> list[CheckerError] | None:
     success = True
 
     if not os.path.exists(_get_target_directory(target_name)):

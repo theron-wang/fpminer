@@ -81,7 +81,7 @@ class TargetProject:
         errors = setup_checker(
             self.target_name, self.target_url, checker
         )
-        if not errors:
+        if errors is None:
             raise RuntimeError(f"Failed to enable checkers for {self.target_name}")
 
         build_file = find_build_system_file(self.base_dir)

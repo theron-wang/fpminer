@@ -7,15 +7,21 @@ from pathlib import Path
 from checker_framework import get_path_to_checker_jar, get_path_to_checker_dir, get_path_to_dljc, get_javac_path
 from utils import run_checker_and_parse_errors, CheckerError
 
-LOGS_ROOT = Path("analysis_agent_logs")
-
 DLJC_BUILD_COMMANDS = [
     ["./gradlew", "compileJava", "--rerun-tasks"],
     ["./mvnw", "compile"]
 ]
 
 
-def run_dljc(target_name: str, target_url: str, tool_name: str) -> list[CheckerError]:
+def run_dljc(target_name: str, target_url: str, tool_name: str) -> list[CheckerError] | None:
+    """
+    Runs dljc on the given target project and checker. Returns a list (could be empty) of errors
+    if dljc ran successfully, or None if it failed.
+    :param target_name: The target name
+    :param target_url: The target url
+    :param tool_name: The tool name
+    :return: A list of errors, or None if unsuccessful
+    """
     if not os.path.exists(f"targets/{target_name}"):
         _clone_target(target_name, target_url)
 
@@ -44,7 +50,9 @@ def run_dljc(target_name: str, target_url: str, tool_name: str) -> list[CheckerE
         if errors:
             return errors
 
-    return []
+        return []
+
+    return None
 
 
 def _run_dljc_print(dljc_cmd: str, cwd: str) -> list[dict] | None:

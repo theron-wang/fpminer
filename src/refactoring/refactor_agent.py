@@ -65,8 +65,11 @@ class RefactorAgentRun:
     modified_content: str = ""
     differential_test_result: DifferentialTestResult = DifferentialTestResult.INCONCLUSIVE
     success: bool = False
-    possible: bool = False
+    possible: bool = True
     error: str = ""
+
+    def annotation_only(self) -> bool:
+        return are_changes_annotation_or_comment_only(self.orig_content, self.modified_content)
 
 
 class RefactorAgentTermination(Exception):

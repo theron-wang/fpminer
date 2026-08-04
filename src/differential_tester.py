@@ -182,7 +182,14 @@ class DifferentialTester:
         if "EQUIVALENT=1" in proc.stdout:
             return DifferentialTestResult.EQUIVALENT, ""
 
-        fuzz_report_path = Path(regex.match(r"->\s*(?P<report>.*)", proc.stdout).group("report"))
+        match = regex.search(r"Report:\s*(?P<report>.*)", proc.stdout)
+
+        if not match:
+            match = regex.search(r"(?P<report>/.*/auto-fuzz-report.md)", proc.stdout)
+            if not match:
+                return DifferentialTestResult.INCONCLUSIVE, ""
+
+        fuzz_report_path = Path(match.group("report"))
 
         result = read_fuzz_report(fuzz_report_path)
 

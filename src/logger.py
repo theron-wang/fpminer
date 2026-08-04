@@ -6,71 +6,106 @@ import sys
 import threading
 import traceback
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Literal
 
 from refactoring.refactor_agent import RefactorAgentRun
 from utils import CheckerError, timestamp
 
 LOGGER_LEVEL = logging.INFO
 
+_SEPARATOR = "-" * 80
+
+# Failure types recorded in specimin_failures.log. Kept as a closed set so the
+# field is a predictable enum for downstream parsing rather than free text.
+FailureType = Literal["minimization", "compilation", "preservation"]
+
+
+def _new_target_checker_counts() -> dict[str, Any]:
+    """Default (zeroed) summary counters for a single (target, checker) pair."""
+    return {
+        "errors_total": 0,
+        "specimin_crashes": {
+            "minimization": 0,
+            "compilation": 0,
+            "preservation": 0,
+        },
+        "refactor_agent_ran": 0,
+        "refactor_success": {
+            "annotation_only": 0,
+            "real_changes": 0,
+        },
+        "refactor_failure": {
+            "annotation_only": 0,
+            "real_changes": 0,
+        },
+        "refactor_errored": 0,
+        "refactor_not_possible": 0,
+    }
+
 
 class FPMinerLogger:
     """
     Centralized, file-based logger for the fpminer pipeline.
 
-    Creates a per-run directory under `results/` containing:
-      - run.log                     human-readable log of everything (DEBUG+ to file,
-                                     INFO+ to console), including full tracebacks
-      - failed_minimizations.jsonl  one JSON record per failed minimization
-      - failed_compilations.jsonl   one JSON record per failed compilation
-      - failed_preservations.jsonl  one JSON record per failed preservation
-      - crashes.jsonl               one JSON record per unhandled exception caught
-                                     by a try/except guard in the pipeline (per-error
-                                     or per-target granularity)
-      - refactor_results.jsonl      one JSON record per RefactorAgent run (final
-                                     success/possible/error outcome for each error)
-      - summary.json                aggregate counts, written by finalize()
+    Creates a per-run directory under `results/run_{run_id}/` containing exactly four
+    files:
 
-    Each *.jsonl file above has a human-readable *.log companion (e.g.
-    failed_minimizations.log) with the same content but real line breaks
-    instead of escaped `\\n`, for content like commands, raw error text, and
-    tracebacks that spans multiple lines.
+      - run.log               human-readable log of everything (DEBUG+ to
+                               file, INFO+ to console), including full
+                               tracebacks. Standard `logging`-formatted lines:
+                               "<timestamp> | <LEVEL>   | <message>".
 
-    All logging calls are defensive: if writing a log record itself fails, that
-    failure is swallowed (and reported via the text logger) rather than being
-    allowed to crash the pipeline.
+      - crashes.log            one fixed-format block per unhandled exception
+                                caught by a try/except guard in the pipeline
+                                (per-error or per-target granularity). Blocks
+                                use a `Field: value` layout with a fixed field
+                                order, separated by a line of dashes, so they
+                                are both readable and trivially parseable
+                                (split on the separator, then split each line
+                                on the first ": ").
+
+      - specimin_failures.log  one fixed-format block per failed
+                                minimization/compilation/preservation. Each
+                                block records the target/checker/error index,
+                                the exact Specimin (`./gradlew run --args=...`)
+                                command, the failure type (`minimization` —
+                                i.e. a Specimin crash, `compilation`, or
+                                `preservation`), and any relevant error text
+                                for that failure type. Same block format as
+                                crashes.log.
+
+      - summary.json           aggregate counts, written by finalize().
+                                Keyed by target, then checker. See
+                                `_new_target_checker_counts()` for the exact
+                                shape of each (target, checker) entry.
+
+    Note: refactor-agent outcomes (the actual diffs/error text/reasoning for
+    a given fix attempt) are tracked and surfaced elsewhere in the pipeline
+    (`RefactorResultHandler`) and are intentionally NOT duplicated here —
+    this logger only keeps aggregate pass/fail/not-possible counts for them.
+
+    All logging calls are defensive: if writing a log record itself fails,
+    that failure is swallowed (and reported via the text logger) rather than
+    being allowed to crash the pipeline.
 
     Thread-safety: a single instance-level lock guards both the `_counts`
-    aggregate dict and every file write (`_append_jsonl`, `_append_text_block`,
-    `finalize`). Multiple threads may safely share one `FPMinerLogger`
-    instance and call any of its methods concurrently. `self.logger` itself
-    is not additionally guarded — the standard `logging` module already
-    serializes handler emission internally, so it's safe to call from
-    multiple threads on its own.
+    aggregate dict and every file write (`_append_block`, `finalize`).
+    Multiple threads may safely share one `FPMinerLogger` instance and call
+    any of its methods concurrently. `self.logger` itself is not
+    additionally guarded — the standard `logging` module already serializes
+    handler emission internally, so it's safe to call from multiple threads
+    on its own.
     """
 
     def __init__(self, run_id: str):
         self.run_id = run_id
-        self.run_dir = Path("results") / f"run_{self.run_id}" / "logs"
+        self.run_dir = Path("results") / f"run_{self.run_id}"
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
         self._lock = threading.Lock()
 
-        self._counts = {
-            "targets_total": 0,
-            "targets_crashed": 0,
-            "errors_total": 0,
-            "skipped": 0,
-            "failed_minimizations": 0,
-            "failed_compilations": 0,
-            "failed_preservations": 0,
-            "crashes": 0,
-            "succeeded": 0,
-            "refactor_runs": 0,
-            "refactor_fix_possible": 0,
-            "refactor_fix_not_possible": 0,
-            "refactor_errored": 0,
-        }
+        # target -> checker -> counts dict (see _new_target_checker_counts)
+        self._counts: dict[str, dict[str, dict[str, Any]]] = {}
 
         self.logger = self._build_logger()
         self.logger.info("Logging initialized. Run directory: %s", self.run_dir)
@@ -83,8 +118,8 @@ class FPMinerLogger:
         logger.setLevel(LOGGER_LEVEL)
         logger.propagate = False
 
-        # Avoid duplicate handlers if a FailureLogger is somehow constructed twice
-        # with the same run_id (e.g. re-entrant calls).
+        # Avoid duplicate handlers if a FPMinerLogger is somehow constructed
+        # twice with the same run_id (e.g. re-entrant calls).
         if logger.handlers:
             return logger
 
@@ -107,41 +142,52 @@ class FPMinerLogger:
     # ------------------------------------------------------------------ #
     # internal helpers
     # ------------------------------------------------------------------ #
-    def _increment(self, key: str, amount: int = 1) -> None:
+    def _get_counts(self, target_name: str, checker: str) -> dict[str, Any]:
+        """Must be called while holding self._lock."""
+        return (
+            self._counts
+            .setdefault(target_name, {})
+            .setdefault(checker, _new_target_checker_counts())
+        )
+
+    def _bump(self, target_name: str, checker: str, *path: str, amount: int = 1) -> None:
+        """Increments a (possibly nested) counter for a (target, checker) pair.
+
+        `path` is one or two keys into that pair's counts dict, e.g.
+        ("errors_total",) or ("specimin_crashes", "minimization").
+        """
         with self._lock:
-            self._counts[key] += amount
+            counts = self._get_counts(target_name, checker)
+            node = counts
+            for key in path[:-1]:
+                node = node[key]
+            node[path[-1]] += amount
 
-    def _append_jsonl(self, filename: str, record: dict[str, Any]) -> None:
-        record = {"timestamp": timestamp(), **record}
-        path = self.run_dir / filename
-        line = json.dumps(record, default=str) + "\n"
-        try:
-            with self._lock:
-                with open(path, "a", encoding="utf-8") as f:
-                    f.write(line)
-        except Exception:
-            # Logging must never be allowed to crash the pipeline.
-            self.logger.exception("Failed to write log record to %s", path)
+    def _append_block(self, filename: str, fields: list[tuple[str, Optional[str]]]) -> None:
+        """Appends one fixed-format, human-readable-and-parseable block to
+        `filename`. `fields` is an ordered list of (label, value) pairs;
+        entries whose value is None/empty are still written (with an empty
+        value) so the field order and presence stay predictable for parsing
+        -- only entirely absent optional text is skipped upstream by callers
+        passing None for it, which renders as `Label:` with nothing after it.
 
-    def _append_text_block(self, filename: str, header: str, sections: list[tuple[str, Optional[str]]]) -> None:
-        """Appends a human-readable block to `filename`, companion to a .jsonl
-        file of the same name. Unlike JSONL, multi-line fields (commands, raw
-        error text, tracebacks) are written with real line breaks instead of
-        escaped `\\n`, so the file is pleasant to read/`less`/`grep` directly.
-
-        `sections` is a list of (label, text) pairs; entries with empty/None
-        text are skipped.
+        Multi-line values (tracebacks, raw checker error text) are indented
+        two spaces so a block can be told apart from the next field by
+        indentation, while still being trivially machine-parseable: split
+        the file on lines of exactly `_SEPARATOR`, then within a block split
+        each unindented line on the first ": ".
         """
         path = self.run_dir / filename
-        lines = [header, "-" * len(header)]
-        for label, text in sections:
-            if not text:
-                continue
-            lines.append(f"{label}:")
-            lines.append(text.rstrip("\n"))
-            lines.append("")
-        lines.append("=" * 80)
-        lines.append("")
+        lines: list[str] = []
+        for label, value in fields:
+            text = "" if value is None else str(value)
+            if "\n" in text:
+                lines.append(f"{label}:")
+                for line in text.rstrip("\n").split("\n"):
+                    lines.append(f"  {line}")
+            else:
+                lines.append(f"{label}: {text}")
+        lines.append(_SEPARATOR)
         block = "\n".join(lines) + "\n"
         try:
             with self._lock:
@@ -154,98 +200,89 @@ class FPMinerLogger:
     # target / error lifecycle
     # ------------------------------------------------------------------ #
     def start_target(self, target_name: str) -> None:
-        self._increment("targets_total")
         self.logger.info("%s Starting target: %s %s", "=" * 20, target_name, "=" * 20)
 
     def finish_target(self, target_name: str) -> None:
         self.logger.info("%s Finished target: %s %s", "=" * 20, target_name, "=" * 20)
 
     def log_error_start(self, target_name: str, checker: str, index: int, total: int) -> None:
-        self._increment("errors_total")
+        self._bump(target_name, checker, "errors_total")
         self.logger.info("[%s/%s] Processing error %d/%d", target_name, checker, index, total)
 
     def log_success(self, target_name: str, checker: str, index: int) -> None:
-        self._increment("succeeded")
         self.logger.info("[%s/%s] Error %d: processed successfully.", target_name, checker, index)
 
     def log_skipped_error(self, target_name: str, targets_fields: list[str], checker: str, index: int):
-        self._increment("skipped")
-        self.logger.info("[%s/%s] Error %d: skipped (targets fields: %s).", target_name, checker, index,
-                         ", ".join(targets_fields))
+        """Targets-only-fields errors are counted in errors_total (already
+        incremented by log_error_start) but are otherwise silently skipped:
+        no dedicated summary bucket or log file entry, just a debug trace in
+        run.log for local troubleshooting."""
+        self.logger.debug("[%s/%s] Error %d: skipped (targets fields: %s).", target_name, checker, index,
+                          ", ".join(targets_fields))
 
     # ------------------------------------------------------------------ #
-    # final agent output (RefactorAgentRun)
+    # final agent output (RefactorAgentRun) -- aggregate counts only; the
+    # per-error detail (diffs, error text, reasoning) is handled elsewhere
+    # in the pipeline and intentionally not logged here.
     # ------------------------------------------------------------------ #
     def log_refactor_result(
             self,
             target_name: str,
             checker: str,
             index: int,
-            run: RefactorAgentRun,
-            specimin_cmd: str = "",
+            run: RefactorAgentRun
     ) -> None:
-        """Records the final output of RefactorAgent.run(error) for a given
-        error — i.e. a `RefactorAgentRun`-shaped object with `success`,
-        `possible`, `error`, and `not_possible_reason` fields.
+        self._bump(target_name, checker, "refactor_agent_ran")
 
-        Written to:
-          - refactor_results.jsonl  one record per error (machine-readable)
-          - refactor_results.log    human-readable companion
-        """
-        success = run.success
-        possible = run.possible
-        error_msg = run.error
-        not_possible_reason = run.error
-
-        self._increment("refactor_runs")
-        if error_msg:
-            self._increment("refactor_errored")
-        elif possible:
-            self._increment("refactor_fix_possible")
-        elif not possible:
-            self._increment("refactor_fix_not_possible")
-
-        if error_msg:
+        if run.error:
+            self._bump(target_name, checker, "refactor_errored")
             self.logger.error(
-                "[%s/%s] Error %d: RefactorAgent errored: %s", target_name, checker, index, error_msg,
+                "[%s/%s] Error %d: RefactorAgent errored.", target_name, checker, index,
             )
-        elif possible:
+        elif run.possible:
+            bucket = "refactor_success" if run.success else "refactor_failure"
+            sub_bucket = "annotation_only" if run.annotation_only() else "real_changes"
+            self._bump(target_name, checker, bucket, sub_bucket)
             self.logger.info(
-                "[%s/%s] Error %d: RefactorAgent found a possible fix (success=%s).",
-                target_name, checker, index, success,
+                "[%s/%s] Error %d: RefactorAgent %s (annotation_only=%s).",
+                target_name, checker, index,
+                "succeeded" if run.success else "found a fix that failed verification",
+                run.annotation_only(),
             )
         else:
+            self._bump(target_name, checker, "refactor_not_possible")
             self.logger.info(
-                "[%s/%s] Error %d: RefactorAgent determined no fix was possible. %s",
-                target_name, checker, index, not_possible_reason or "",
+                "[%s/%s] Error %d: RefactorAgent determined no fix was possible.",
+                target_name, checker, index,
             )
 
-        self._append_jsonl("refactor_results.jsonl", {
-            "target": target_name,
-            "checker": checker,
-            "error_index": index,
-            "specimin_cmd": specimin_cmd,
-            "success": success,
-            "possible": possible,
-            "error": error_msg,
-            "not_possible_reason": not_possible_reason,
-        })
-        self._append_text_block(
-            "refactor_results.log",
-            header=(
-                f"[{timestamp()}] {target_name}/{checker} — error {index} — "
-                f"REFACTOR RESULT (success={success}, possible={possible})"
-            ),
-            sections=[
-                ("Command", specimin_cmd),
-                ("Error", error_msg),
-                ("Not-possible reason", not_possible_reason),
-            ],
+    # ------------------------------------------------------------------ #
+    # specimin failures (minimization / compilation / preservation)
+    # ------------------------------------------------------------------ #
+    def _log_specimin_failure(
+            self,
+            failure_type: FailureType,
+            target_name: str,
+            checker: str,
+            index: int,
+            specimin_cmd: str,
+            message: Optional[str],
+    ) -> None:
+        self._bump(target_name, checker, "specimin_crashes", failure_type)
+        self.logger.warning(
+            "[%s/%s] Error %d: %s failure. Command: %s",
+            target_name, checker, index, failure_type, specimin_cmd,
         )
+        self._append_block("specimin_failures.log", [
+            ("Timestamp", timestamp()),
+            ("Target", target_name),
+            ("Checker", checker),
+            ("ErrorIndex", str(index)),
+            ("FailureType", failure_type),
+            ("Command", specimin_cmd),
+            ("Message", message),
+        ])
 
-    # ------------------------------------------------------------------ #
-    # expected-failure logging (not exceptions, just pipeline outcomes)
-    # ------------------------------------------------------------------ #
     def log_failed_minimization(
             self,
             target_name: str,
@@ -253,22 +290,8 @@ class FPMinerLogger:
             index: int,
             specimin_cmd: str = "",
     ) -> None:
-        """Records the exact Specimin invocation (the `./gradlew run --args=...` command) that
-        failed to minimize the error."""
-        self._increment("failed_minimizations")
-        self.logger.warning("[%s/%s] Error %d: minimization failed. Command: %s",
-                            target_name, checker, index, specimin_cmd)
-        self._append_jsonl("failed_minimizations.jsonl", {
-            "target": target_name,
-            "checker": checker,
-            "error_index": index,
-            "specimin_cmd": specimin_cmd,
-        })
-        self._append_text_block(
-            "failed_minimizations.log",
-            header=f"[{timestamp()}] {target_name}/{checker} — error {index} — FAILED MINIMIZATION",
-            sections=[("Command", specimin_cmd)],
-        )
+        """Specimin itself crashed / failed to produce minimized output."""
+        self._log_specimin_failure("minimization", target_name, checker, index, specimin_cmd, None)
 
     def log_failed_compilation(
             self,
@@ -278,29 +301,10 @@ class FPMinerLogger:
             specimin_cmd: str = "",
             errors: list[CheckerError] | None = None,
     ) -> None:
-        """Records the Specimin command plus the raw text of every compilation error found in the
-        minimized output."""
-        self._increment("failed_compilations")
-        compilation_errors = [
-            e.raw for e in (errors or []) if e.is_compilation_error()
-        ]
-        self.logger.warning("[%s/%s] Error %d: minimized output failed to compile. Command: %s",
-                            target_name, checker, index, specimin_cmd)
-        self._append_jsonl("failed_compilations.jsonl", {
-            "target": target_name,
-            "checker": checker,
-            "error_index": index,
-            "specimin_cmd": specimin_cmd,
-            "errors": compilation_errors,
-        })
-        self._append_text_block(
-            "failed_compilations.log",
-            header=f"[{timestamp()}] {target_name}/{checker} — error {index} — FAILED COMPILATION",
-            sections=[
-                ("Command", specimin_cmd),
-                ("Compilation errors", "\n".join(compilation_errors) if compilation_errors else None),
-            ],
-        )
+        """Minimized output failed to compile."""
+        compilation_errors = [e.raw for e in (errors or []) if e.is_compilation_error()]
+        message = "\n".join(compilation_errors) if compilation_errors else None
+        self._log_specimin_failure("compilation", target_name, checker, index, specimin_cmd, message)
 
     def log_failed_preservation(
             self,
@@ -311,32 +315,17 @@ class FPMinerLogger:
             expected: CheckerError | None = None,
             errors_in_minimized: list[CheckerError] | None = None,
     ) -> None:
-        """Records the Specimin command, the raw text of the expected error, and the raw text of every
-        error actually observed in the minimized output."""
-        self._increment("failed_preservations")
+        """Minimization succeeded and compiled, but the original error was
+        not reproduced in the minimized output."""
         expected_raw = expected.raw if expected is not None else None
         observed_raw = [e.raw for e in (errors_in_minimized or [])]
-        self.logger.warning(
-            "[%s/%s] Error %d: minimization failed to preserve the original error. Command: %s",
-            target_name, checker, index, specimin_cmd,
-        )
-        self._append_jsonl("failed_preservations.jsonl", {
-            "target": target_name,
-            "checker": checker,
-            "error_index": index,
-            "specimin_cmd": specimin_cmd,
-            "expected": expected_raw,
-            "errors_in_minimized": observed_raw,
-        })
-        self._append_text_block(
-            "failed_preservations.log",
-            header=f"[{timestamp()}] {target_name}/{checker} — error {index} — FAILED PRESERVATION",
-            sections=[
-                ("Command", specimin_cmd),
-                ("Expected", expected_raw),
-                ("Errors in minimized output", "\n".join(observed_raw) if observed_raw else None),
-            ],
-        )
+        message_parts = []
+        if expected_raw:
+            message_parts.append(f"Expected: {expected_raw}")
+        if observed_raw:
+            message_parts.append("Observed:\n" + "\n".join(observed_raw))
+        message = "\n".join(message_parts) if message_parts else None
+        self._log_specimin_failure("preservation", target_name, checker, index, specimin_cmd, message)
 
     # ------------------------------------------------------------------ #
     # unhandled-exception logging
@@ -351,13 +340,14 @@ class FPMinerLogger:
     ) -> None:
         """Record an unhandled exception caught by a try/except guard.
 
-        `scope` describes the granularity at which the exception was caught and
-        recovered from, e.g. "target", "target_setup", or "error".
-        """
-        self._increment("crashes")
-        if scope in ("target", "target_setup"):
-            self._increment("targets_crashed")
+        `scope` describes the granularity at which the exception was caught
+        and recovered from, e.g. "target", "target_setup", or "error".
 
+        Crashes are NOT counted in summary.json (by design) -- they're
+        tracked here in crashes.log only. They ARE still reflected in
+        errors_total for error-scoped crashes, via the log_error_start call
+        that already ran for that error before processing crashed.
+        """
         tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
         self.logger.error(
             "[%s]%s Unhandled exception at '%s' level: %s: %s",
@@ -369,39 +359,34 @@ class FPMinerLogger:
         )
         self.logger.debug(tb)
 
-        self._append_jsonl("crashes.jsonl", {
-            "scope": scope,
-            "target": target_name,
-            "checker": checker,
-            "error_index": index,
-            "exception_type": type(exc).__name__,
-            "message": str(exc),
-            "traceback": tb,
-        })
-        self._append_text_block(
-            "crashes.log",
-            header=(
-                f"[{timestamp()}] {target_name}"
-                f"{f'/{checker}' if checker else ''} — {f'error {index} — ' if index is not None else ''}"
-                f"CRASH at '{scope}' level: {type(exc).__name__}"
-            ),
-            sections=[
-                ("Message", str(exc)),
-                ("Traceback", tb),
-            ],
-        )
+        self._append_block("crashes.log", [
+            ("Timestamp", timestamp()),
+            ("Scope", scope),
+            ("Target", target_name),
+            ("Checker", checker),
+            ("ErrorIndex", "" if index is None else str(index)),
+            ("ExceptionType", type(exc).__name__),
+            ("Message", str(exc)),
+            ("Traceback", tb),
+        ])
 
     # ------------------------------------------------------------------ #
     # wrap-up
     # ------------------------------------------------------------------ #
     def finalize(self) -> None:
+        """Writes summary.json: for every (target, checker) pair seen,
+        emits the counts dict described in `_new_target_checker_counts()`
+        (errors_total; specimin_crashes broken down by minimization /
+        compilation / preservation; refactor_agent_ran; refactor_success and
+        refactor_failure each broken down by annotation_only / real_changes;
+        refactor_errored; refactor_not_possible)."""
         summary_path = self.run_dir / "summary.json"
         try:
             with self._lock:
-                counts_snapshot = dict(self._counts)
+                snapshot = json.loads(json.dumps(self._counts))
                 with open(summary_path, "w", encoding="utf-8") as f:
-                    json.dump(counts_snapshot, f, indent=2)
+                    json.dump(snapshot, f, indent=2)
         except Exception:
             self.logger.exception("Failed to write summary.json")
             return
-        self.logger.info("Run complete. Summary: %s", counts_snapshot)
+        self.logger.info("Run complete. Summary written to %s", summary_path)

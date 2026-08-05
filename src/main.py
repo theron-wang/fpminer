@@ -102,7 +102,6 @@ def run(run_id: str, target: Target, checkers: list[str], logger: FPMinerLogger)
         project = TargetProject(target.name, target.url, checkers[0])
     except ValueError as exc:
         logger.logger.error("Failed to enable checkers for %s: %s", target.name, exc)
-        print(f"Failed to enable checkers for {target.name}")
         return
 
     jar_path = project.compile_jar()
@@ -111,6 +110,7 @@ def run(run_id: str, target: Target, checkers: list[str], logger: FPMinerLogger)
     for checker in checkers:
         logger.start_checker(target.name, checker)
         repo_dir = project.checkout_workspace(checker, checkers[0])
+        logger.log_setup_method(target.name, checker, project.checker_setup_type)
         result_handler = RefactorResultHandler(run_id, target.name, checker)
         with Pool(processes=int(os.getenv("MAX_PROCESSES", os.cpu_count() or 1))) as pool:
             args = [(i, e, project, repo_dir, diff_tester) for i, e in enumerate(project.errors)]
@@ -207,7 +207,7 @@ def main():
         checkers = [line.strip() for line in f.readlines()]
 
     with open(args.targets) as f:
-        targets = [Target(**json.loads(line)) for line in f if not line.startswith("//")]
+        targets = [Target(**json.loads(line)) for line in f if line.strip() and not line.startswith("//")]
 
     dotenv.load_dotenv()
 

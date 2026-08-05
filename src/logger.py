@@ -13,7 +13,7 @@ from utils import CheckerError, timestamp
 
 LOGGER_LEVEL = logging.INFO
 
-_SEPARATOR = "-" * 80
+_SEPARATOR = "=" * 80
 
 # Failure types recorded in specimin_failures.log. Kept as a closed set so the
 # field is a predictable enum for downstream parsing rather than free text.
@@ -23,8 +23,9 @@ FailureType = Literal["minimization", "compilation", "preservation"]
 def _new_target_checker_counts() -> dict[str, Any]:
     """Default (zeroed) summary counters for a single (target, checker) pair."""
     return {
+        "setup_method": None,
         "errors_total": 0,
-        "specimin_crashes": {
+        "specimin_errors": {
             "minimization": 0,
             "compilation": 0,
             "preservation": 0,
@@ -77,7 +78,10 @@ class FPMinerLogger:
       - summary.json           aggregate counts, written by finalize().
                                 Keyed by target, then checker. See
                                 `_new_target_checker_counts()` for the exact
-                                shape of each (target, checker) entry.
+                                shape of each (target, checker) entry. Each
+                                entry also carries a `setup_method` field
+                                ("dljc" or "analysisagent", or null if never
+                                recorded) set via `log_setup_method()`.
 
     Note: refactor-agent outcomes (the actual diffs/error text/reasoning for
     a given fix attempt) are tracked and surfaced elsewhere in the pipeline
@@ -154,7 +158,7 @@ class FPMinerLogger:
         """Increments a (possibly nested) counter for a (target, checker) pair.
 
         `path` is one or two keys into that pair's counts dict, e.g.
-        ("errors_total",) or ("specimin_crashes", "minimization").
+        ("errors_total",) or ("specimin_errors", "minimization").
         """
         with self._lock:
             counts = self._get_counts(target_name, checker)
@@ -211,6 +215,18 @@ class FPMinerLogger:
 
     def finish_checker(self, checker: str) -> None:
         self.logger.info("%s Finished checker: %s %s", "=" * 20, checker, "=" * 20)
+
+    def log_setup_method(self, target_name: str, checker: str, method: str) -> None:
+        """Records how this (target, checker) pair's environment was set up
+        ("dljc" or "analysisagent"). Overwrites any previously recorded
+        value for the pair, so it's safe to call again if the setup path is
+        retried with a different method. Surfaced in summary.json as the
+        pair's `setup_method` field.
+        """
+        with self._lock:
+            counts = self._get_counts(target_name, checker)
+            counts["setup_method"] = method
+        self.logger.info("[%s/%s] Setup method: %s", target_name, checker, method)
 
     def log_error_start(self, target_name: str, checker: str, index: int, total: int) -> None:
         self._bump(target_name, checker, "errors_total")
@@ -275,7 +291,7 @@ class FPMinerLogger:
             specimin_cmd: str,
             message: Optional[str],
     ) -> None:
-        self._bump(target_name, checker, "specimin_crashes", failure_type)
+        self._bump(target_name, checker, "specimin_errors", failure_type)
         self.logger.warning(
             "[%s/%s] Error %d: %s failure. Command: %s",
             target_name, checker, index, failure_type, specimin_cmd,
@@ -383,10 +399,11 @@ class FPMinerLogger:
     def finalize(self) -> None:
         """Writes summary.json: for every (target, checker) pair seen,
         emits the counts dict described in `_new_target_checker_counts()`
-        (errors_total; specimin_crashes broken down by minimization /
-        compilation / preservation; refactor_agent_ran; refactor_success and
-        refactor_failure each broken down by annotation_only / real_changes;
-        refactor_errored; refactor_not_possible)."""
+        (setup_method; errors_total; specimin_errors broken down by
+        minimization / compilation / preservation; refactor_agent_ran;
+        refactor_success and refactor_failure each broken down by
+        annotation_only / real_changes; refactor_errored;
+        refactor_not_possible)."""
         summary_path = self.run_dir / "summary.json"
         try:
             with self._lock:

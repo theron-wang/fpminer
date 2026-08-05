@@ -7,9 +7,10 @@ from pathlib import Path
 from checker_framework import get_path_to_checker_jar, get_path_to_checker_dir, get_path_to_dljc, get_javac_path
 from utils import run_checker_and_parse_errors, CheckerError
 
+# DLJC cannot have compile be cached
 DLJC_BUILD_COMMANDS = [
     ["./gradlew", "compileJava", "--rerun-tasks"],
-    ["./mvnw", "compile"]
+    ["./mvnw", "clean", "compile"]
 ]
 
 

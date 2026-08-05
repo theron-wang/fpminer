@@ -196,11 +196,7 @@ class DifferentialTester:
         if len(result) > 1:
             return DifferentialTestResult.INCONCLUSIVE, "More than one method was modified when only one should have been"
         elif len(result) == 0:
-            # This is technically successful, since this means all methods are the same between the two.
-            # Since this is used by refactor_agent anyway, the checker will not pass if no changes have
-            # been made, so this isn't a problem (or this is an annotation-only change, and it will be
-            # handled elsewhere anyway)
-            return DifferentialTestResult.EQUIVALENT, ""
+            return DifferentialTestResult.INCONCLUSIVE, "Method pair may have been pruned, or some other error occurred in the differential tester that prevented checks for semantic equivalence."
 
         status, reasoning = result[0]
 

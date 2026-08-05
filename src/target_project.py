@@ -2,6 +2,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Literal
 
 from checker_setup.main import setup_checker
 from utils import find_build_system_file, replace_in_uncommitted_changes, CheckerError
@@ -46,6 +47,7 @@ def _build_gradle_jar(directory: Path):
 class TargetProject:
     """Represents a target repository and its checker-specific workspaces."""
     errors: list[CheckerError]
+    checker_setup_type: Literal["dljc", "analysisagent"]
     build_file: Path
 
     def __init__(self, target_name: str, target_url: str, checker: str):
@@ -78,7 +80,7 @@ class TargetProject:
         # This is ok to call on each checker. dljc is not an expensive call, and AnalysisAgent
         # only runs once per target project; subsequent calls to this will use the known checker
         # command to run the new checker.
-        errors = setup_checker(
+        setup_type, errors = setup_checker(
             self.target_name, self.target_url, checker
         )
         if errors is None:
@@ -91,6 +93,7 @@ class TargetProject:
 
         self.build_file = build_file
         self.errors = errors
+        self.checker_setup_type = setup_type
         self.active_checker = checker
 
         if os.path.exists(repo_dir):
@@ -114,7 +117,8 @@ class TargetProject:
         working_dir = self.build_file.parent
 
         if self.build_file.name == "pom.xml":
-            subprocess.run(["mvn", "install", "package"], cwd=working_dir)
+            subprocess.run(["./mvnw", "package"], cwd=working_dir,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             candidates = list(working_dir.rglob("target/*.jar"))
         else:
             _build_gradle_jar(working_dir)

@@ -14,6 +14,7 @@ def _write(path: Path, result: RefactorAgentRun, error_num: int, lock: threading
     with lock:
         with path.open("a") as f:
             f.write(f"==================> Error {error_num}\n")
+            f.write(str(result.source_dir.resolve()) + "\n")
             f.write(f"{json.dumps(metadata)}\n")
             f.write("== ORIGINAL =======\n")
             f.write(result.orig_content + "\n")

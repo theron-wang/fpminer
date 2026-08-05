@@ -62,6 +62,7 @@ def _is_rate_limit_or_service_unavailable_error(exc: BaseException) -> bool:
 @dataclass
 class RefactorAgentRun:
     orig_content: str
+    source_dir: Path
     modified_content: str = ""
     differential_test_result: DifferentialTestResult = DifferentialTestResult.INCONCLUSIVE
     success: bool = False
@@ -230,6 +231,19 @@ class RefactorAgent:
             match = matches[0]
             new_method_content = content[:match.start()] + new_str + content[match.end():]
 
+            if content.count("@SuppressWarnings") < new_method_content.count("@SuppressWarnings"):
+                return json.dumps({
+                    "success": False,
+                    "message": (
+                        "You cannot add additional @SuppressWarnings. Make an edit without"
+                        "the suppression of any warnings. Current content:"
+                        "\n\n"
+                        "```java"
+                        f"{content}"
+                        "```"
+                    ),
+                })
+
             file_content = path_to_workspace_copy.read_text()
             new_file_content = file_content.replace(content, new_method_content, 1)
 
@@ -374,7 +388,7 @@ class RefactorAgent:
         """
         initial_prompt = self._build_initial_prompt()
 
-        result = RefactorAgentRun(self._get_original_target_method_content())
+        result = RefactorAgentRun(self._get_original_target_method_content(), self.orig_directory.parent)
 
         try:
             self._run_sync_with_rate_limit_retry(initial_prompt)

@@ -1,8 +1,17 @@
-# false-positives-miner
+# FPMiner
 
-Pipeline for mining and reducing Checker Framework false positives across target Java repositories.
+A pipeline for mining and reducing Checker Framework false positive patterns across target Java repositories.
+
+FPMiner runs in two steps:
+
+1. **Analysis** — For each target repository, configure and run the specified Checker Framework checkers to identify false positives.
+2. **Refactoring** — For each error found during analysis, a refactoring agent generates a patch that removes the checker error while preserving the original semantics of the code. This step is parallelized, so increasing the number of CPU cores available to the process will greatly improve output speeds.
+
+---
 
 ## Setup
+
+Install dependencies:
 
 ```bash
 uv sync
@@ -11,19 +20,44 @@ uv sync
 Create a `.env` file in the repository root:
 
 ```dotenv
+# LLM API key, based on the models you use
+# For example:
 GEMINI_API_KEY=your-key
-EXEC_AGENT_MODEL=model to use for AnalysisAgent (LiteLLM format: e.g., gemini/gemini-3-flash-preview)
-SPECIMIN=(optional path to a local copy of Specimin)
-REFACTOR_AGENT_MODEL=model to use for refactoring (PydanticAI format: e.g., google:gemini-3-flash-preview)
-REFACTOR_AGENT_MAX_RPM=max requests per minute for refactoring agent
-CHECKER_FRAMEWORK_VERSION=the CF version to use
-MAX_PROCESSES=the maximum number of concurrent processes to run (default: os.cpu_count())
+OPENAI_API_KEY=your-key
+ANTHROPIC_API_KEY=your-key
+
+# Model used by the AnalysisAgent (LiteLLM format).
+# Example: gemini/gemini-3-flash-preview
+EXEC_AGENT_MODEL=gemini/gemini-3-flash-preview
+
+# Model used for refactoring (PydanticAI format).
+# Example: google:gemini-3-flash-preview
+REFACTOR_AGENT_MODEL=google:gemini-3-flash-preview
+
+# Maximum requests per minute for the refactoring agent.
+# Default: 15
+REFACTOR_AGENT_MAX_RPM=15
+
+# Optional path to a local Specimin installation.
+SPECIMIN=
+
+# Checker Framework version to use.
+# Default: 4.2.1
+CHECKER_FRAMEWORK_VERSION=4.2.1
+
+# Maximum number of concurrent processes.
+# Default: os.cpu_count()
+MAX_PROCESSES=
 ```
 
-## Runtime requirements
+### Runtime requirements
 
-- Docker installed, available on `PATH`, and running.
-- A POSIX-style environment (Linux/macOS, or WSL on Windows).
+- A POSIX-style environment (Linux/macOS, or WSL on Windows)
+- Docker installed, available on `PATH`, and running
+- `git` installed and available on `PATH`
+- A valid Java installation (Java 17+)
+
+---
 
 ## Usage
 
@@ -31,29 +65,89 @@ MAX_PROCESSES=the maximum number of concurrent processes to run (default: os.cpu
 py src/main.py -c checkers.txt -t targets.jsonl
 ```
 
-- `checkers.txt`: one fully-qualified Checker Framework checker per line, for example:
+| Argument | Description |
+|---|---|
+| `checkers.txt` | One fully-qualified Checker Framework checker per line |
+| `targets.jsonl` | One target repository per line (JSON Lines format) |
 
-  ```text
-  org.checkerframework.checker.nullness.NullnessChecker
-  org.checkerframework.checker.resourceleak.ResourceLeakChecker
-  org.checkerframework.checker.interning.InterningChecker
-  ```
+**`checkers.txt` example:**
 
-- `targets.jsonl`: one target repository per line, for example:
+```text
+org.checkerframework.checker.nullness.NullnessChecker
+org.checkerframework.checker.resourceleak.ResourceLeakChecker
+org.checkerframework.checker.index.IndexChecker
+org.checkerframework.checker.optional.OptionalChecker
+```
 
-  ```json lines
-  {"name": "jopt-simple", "url": "https://github.com/jopt-simple/jopt-simple"}
-  ```
+**`targets.jsonl` example:**
 
-## Logs and outputs
+```json lines
+{"name": "jopt-simple", "url": "https://github.com/jopt-simple/jopt-simple"}
+```
 
-- Pipeline run logs: `logs/run_<timestamp>/`
-- Failed minimizations: `logs/run_<timestamp>/failed_minimizations.jsonl` and `.log`
-- Failed compilations: `logs/run_<timestamp>/failed_compilations.jsonl` and `.log`
-- Failed preservations: `logs/run_<timestamp>/failed_preservations.jsonl` and `.log`
-- Unhandled crashes: `logs/run_<timestamp>/crashes.jsonl` and `.log`
-- Refactor outputs: `logs/run_<timestamp>/refactor_results.jsonl` and `.log`
+---
 
-## Contributor/agent guidance
+## Output
+
+All output, including logs and results, is stored in the `results/run_<timestamp>/` directory.
+
+### Logs
+
+| Log | Path |
+|---|---|
+| Run logs | `results/run_<timestamp>/run.log` |
+| Crash logs | `results/run_<timestamp>/crashes.log` |
+| Specimin failure logs | `results/run_<timestamp>/specimin_failures.log` |
+| Run summary | `results/run_<timestamp>/summary.json` |
+
+### Diffs
+
+Each target/checker pair creates a subdirectory at `results/run_<timestamp>/output/<target>/<checker>`, containing:
+
+| File | Description |
+|---|---|
+| `failure/annotation_only.txt` | Refactor agent runs whose refactored code only changed annotations, where the agent was not able to resolve the checker error |
+| `failure/other_errors.txt` | Refactor agent runs that failed for other reasons — e.g. the agent ran out of attempts to produce semantically-equivalent code, the LLM was rate-limited, or another crash occurred |
+| `success/false_positives.txt` | Refactor agent runs that successfully resolved the checker error and produced semantically-equivalent code |
+| `success/annotation_only.txt` | Refactor agent runs that successfully resolved the checker error, but only changed annotations |
+| `unresolved/inconclusive.txt` | Runs where the differential tester was unable to determine if the refactored code was semantically equivalent to the original |
+| `unresolved/not_possible.txt` | Runs where the agent declared it was not possible to create semantics-preserving code that resolved the checker error |
+
+### Artifacts
+
+#### Refactor agent
+
+The refactor agent leaves behind artifacts in the `workspace/` directory:
+
+```
+workspace/
+├── <target>/
+│   ├── <checker>/
+│       ├── <error_number>/
+│           ├── orig/          # original Speciminified code
+│           ├── modified/      # refactored code
+│           ├── diff_testing/  # target method with the full file from the original codebase
+│   ├── <target>/              # copy of the target repository
+```
+
+#### Tools
+
+Used during the mining process and cloned into the `tools/` directory:
+
+- [The Checker Framework](https://checkerframework.org/)
+- [Differential-Test-Fuzzing](https://github.com/musta55/Differential-Fuzz-Testing)
+- [Specimin](https://github.com/njit-jerse/specimin)
+
+#### Targets
+
+Target repositories are cloned into the `targets/` directory, set up for analysis and refactoring.
+
+#### AnalysisAgent
+
+AnalysisAgent leaves behind logs and workspace artifacts in the `analysis_agent/` directory.
+
+---
+
+## Contributor / Agent Guidance
 
 See [`AGENTS.md`](./AGENTS.md) for repository-specific expectations.

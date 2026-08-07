@@ -33,5 +33,6 @@ results/
 targets/
 workspace/
 tools/
+analysis_agent/
 
 .env

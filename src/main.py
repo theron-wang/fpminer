@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 from dataclasses import dataclass
+from multiprocessing import Pool
 from pathlib import Path
 from typing import Literal
 
@@ -20,7 +21,9 @@ from more_itertools import first
 from refactoring.refactor_agent import RefactorAgent, RefactorAgentRun
 from refactoring.refactor_result_handler import RefactorResultHandler
 from target_project import TargetProject
-from utils import run_checker_and_parse_errors, CheckerError, timestamp
+from utils import run_checker_and_parse_errors, CheckerError, timestamp, ensure_unbounded_diagnostics_and_cf_only_errors
+
+DRY_RUN_MAX_ERRORS = 3
 
 faulthandler.enable()
 
@@ -93,8 +96,12 @@ def _log_result(logger: FPMinerLogger, project: TargetProject, result: ProcessRe
         logger.logger.error("Unknown ProcessResult outcome %r for error %d", result.outcome, index)
 
 
-def run(run_id: str, target: Target, checkers: list[str], logger: FPMinerLogger):
-    """Process one target repository against all configured checkers."""
+def run(run_id: str, target: Target, checkers: list[str], logger: FPMinerLogger, dry_run: bool = False,
+        setup_only: bool = False):
+    """Process one target repository against all configured checkers.
+
+    If dry_run is True, each target/checker pair is capped at
+    DRY_RUN_MAX_ERRORS errors so the pipeline can be smoke-tested quickly."""
     logger.start_target(target.name)
 
     try:
@@ -110,15 +117,21 @@ def run(run_id: str, target: Target, checkers: list[str], logger: FPMinerLogger)
         logger.start_checker(target.name, checker)
         repo_dir = project.checkout_workspace(checker, checkers[0])
         logger.log_setup_method(target.name, checker, project.checker_setup_type)
+
+        errors = project.errors[:DRY_RUN_MAX_ERRORS] if dry_run else project.errors
+        logger.log_total_errors(target.name, checker, len(project.errors))
         result_handler = RefactorResultHandler(run_id, target.name, checker)
-        with Pool(processes=int(os.getenv("MAX_PROCESSES", os.cpu_count() or 1))) as pool:
-            args = [(i, e, project, repo_dir, diff_tester) for i, e in enumerate(project.errors)]
 
-            for result in pool.imap_unordered(_process_one_error_star, args):
-                _log_result(logger, project, result)
+        if not setup_only:
+            with Pool(processes=int(os.getenv("MAX_PROCESSES", os.cpu_count() or 1))) as pool:
+                args = [(i, e, project, repo_dir, diff_tester) for i, e in enumerate(errors)]
 
-                if result.refactor_run:
-                    result_handler.handle_refactor_result(result.refactor_run, result.index)
+                for result in pool.imap_unordered(_process_one_error_star, args):
+                    _log_result(logger, project, result)
+
+                    if result.refactor_run:
+                        result_handler.handle_refactor_result(result.refactor_run, result.index)
+                        
         logger.finish_checker(checker)
 
     logger.finish_target(target.name)
@@ -146,8 +159,11 @@ def process_one_error(index: int, error: CheckerError, project: TargetProject, r
             return ProcessResult(index=index + 1, outcome="failed_minimization",
                                  specimin_cmd=executed_specimin_cmd)
 
-        checker_cmd = checker_framework.get_command_for_checker(project.active_checker, specimin_output)
+        checker_cmd = ensure_unbounded_diagnostics_and_cf_only_errors(
+            checker_framework.get_command_for_checker(project.active_checker, specimin_output))
         errors_in_minimized = run_checker_and_parse_errors(checker_cmd, specimin_output)
+
+        assert errors_in_minimized is not None
 
         error_transposed = first((e for e in errors_in_minimized if e.likely_equals(error)), None)
 
@@ -181,6 +197,10 @@ def main():
     parser.add_argument("-c", "--checkers", type=str, help="Path to the file containing the list of checkers to run")
     parser.add_argument("-t", "--targets", type=str,
                         help="Path to the file containing the list of repositories to run on")
+    parser.add_argument("--dry-run", action="store_true",
+                        help=f"Limit each target/checker pair to at most {DRY_RUN_MAX_ERRORS} errors, for a quick smoke test")
+    parser.add_argument("--setup-only", action="store_true",
+                        help=f"Run the checker setup step only for each target project, without running the full pipeline")
 
     args = parser.parse_args()
 
@@ -221,7 +241,7 @@ def main():
 
     for target in targets:
         try:
-            run(run_id, target, checkers, logger)
+            run(run_id, target, checkers, logger, dry_run=args.dry_run, setup_only=args.setup_only)
         except Exception as exc:
             logger.log_crash(scope="target", target_name=target.name, exc=exc)
 

@@ -50,7 +50,7 @@ class RefactorResultHandler:
         self.not_possible_lock = threading.Lock()
 
     def handle_refactor_result(self, result: RefactorAgentRun, error_num: int):
-        if result.annotation_only():
+        if result.annotation_only() and not result.error:
             _write(self.annotations_success if result.success else self.annotations_failure, result, error_num,
                    self.annotations_success_lock if result.success else self.annotations_failure_lock)
         elif result.success:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import sys
 import threading
@@ -24,7 +23,7 @@ def _new_target_checker_counts() -> dict[str, Any]:
     """Default (zeroed) summary counters for a single (target, checker) pair."""
     return {
         "setup_method": None,
-        "errors_total": 0,
+        "total_errors": 0,
         "specimin_errors": {
             "minimization": 0,
             "compilation": 0,
@@ -158,7 +157,7 @@ class FPMinerLogger:
         """Increments a (possibly nested) counter for a (target, checker) pair.
 
         `path` is one or two keys into that pair's counts dict, e.g.
-        ("errors_total",) or ("specimin_errors", "minimization").
+        ("total_errors",) or ("specimin_errors", "minimization").
         """
         with self._lock:
             counts = self._get_counts(target_name, checker)
@@ -210,7 +209,7 @@ class FPMinerLogger:
         self.logger.info("%s Finished target: %s %s", "=" * 20, target_name, "=" * 20)
 
     def start_checker(self, target_name: str, checker: str) -> None:
-        self._bump(target_name, checker, "errors_total", amount=0)
+        self._bump(target_name, checker, "total_errors", amount=0)
         self.logger.info("%s Starting checker: %s %s", "=" * 20, checker, "=" * 20)
 
     def finish_checker(self, checker: str) -> None:
@@ -228,15 +227,29 @@ class FPMinerLogger:
             counts["setup_method"] = method
         self.logger.info("[%s/%s] Setup method: %s", target_name, checker, method)
 
+    def log_total_errors(self, target_name: str, checker: str, total: int) -> None:
+        """Records the total number of errors to be processed for this
+        (target, checker) pair. Intended to be called once, before any
+        per-error processing begins (e.g. right after `start_checker`).
+
+        Overwrites any previously recorded value if called again -- callers
+        that only expect this to run once should treat a second call as a
+        bug on their end, but this method itself does not enforce
+        single-call semantics or warn on overwrite.
+        """
+        with self._lock:
+            counts = self._get_counts(target_name, checker)
+            counts["total_errors"] = total
+        self.logger.info("[%s/%s] Total errors to process: %d", target_name, checker, total)
+
     def log_error_start(self, target_name: str, checker: str, index: int, total: int) -> None:
-        self._bump(target_name, checker, "errors_total")
         self.logger.info("[%s/%s] Processing error %d/%d", target_name, checker, index, total)
 
     def log_success(self, target_name: str, checker: str, index: int) -> None:
         self.logger.info("[%s/%s] Error %d: processed successfully.", target_name, checker, index)
 
     def log_skipped_error(self, target_name: str, targets_fields: list[str], checker: str, index: int):
-        """Targets-only-fields errors are counted in errors_total (already
+        """Targets-only-fields errors are counted in total_errors (already
         incremented by log_error_start) but are otherwise silently skipped:
         no dedicated summary bucket or log file entry, just a debug trace in
         run.log for local troubleshooting."""
@@ -368,7 +381,7 @@ class FPMinerLogger:
 
         Crashes are NOT counted in summary.json (by design) -- they're
         tracked here in crashes.log only. They ARE still reflected in
-        errors_total for error-scoped crashes, via the log_error_start call
+        total_errors for error-scoped crashes, via the log_error_start call
         that already ran for that error before processing crashed.
         """
         tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
@@ -399,18 +412,8 @@ class FPMinerLogger:
     def finalize(self) -> None:
         """Writes summary.json: for every (target, checker) pair seen,
         emits the counts dict described in `_new_target_checker_counts()`
-        (setup_method; errors_total; specimin_errors broken down by
+        (setup_method; total_errors; specimin_errors broken down by
         minimization / compilation / preservation; refactor_agent_ran;
         refactor_success and refactor_failure each broken down by
         annotation_only / real_changes; refactor_errored;
         refactor_not_possible)."""
-        summary_path = self.run_dir / "summary.json"
-        try:
-            with self._lock:
-                snapshot = json.loads(json.dumps(self._counts))
-                with open(summary_path, "w", encoding="utf-8") as f:
-                    json.dump(snapshot, f, indent=2)
-        except Exception:
-            self.logger.exception("Failed to write summary.json")
-            return
-        self.logger.info("Run complete. Summary written to %s", summary_path)

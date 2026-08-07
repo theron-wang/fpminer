@@ -208,6 +208,12 @@ class FPMinerLogger:
     def finish_target(self, target_name: str) -> None:
         self.logger.info("%s Finished target: %s %s", "=" * 20, target_name, "=" * 20)
 
+    def start_compile_jar(self, target_name: str) -> None:
+        self.logger.info("Starting compile JAR: %s", target_name)
+
+    def finish_compile_jar(self, target_name: str, jar_path: Path) -> None:
+        self.logger.info("Finished compile JAR: %s. Output: %s", target_name, jar_path.resolve())
+
     def start_checker(self, target_name: str, checker: str) -> None:
         self._bump(target_name, checker, "total_errors", amount=0)
         self.logger.info("%s Starting checker: %s %s", "=" * 20, checker, "=" * 20)

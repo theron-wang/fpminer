@@ -106,17 +106,22 @@ def run(run_id: str, target: Target, checkers: list[str], logger: FPMinerLogger,
 
     try:
         project = TargetProject(target.name, target.url, checkers[0])
+        logger.log_setup_method(target.name, checkers[0], project.checker_setup_type)
     except ValueError as exc:
         logger.logger.error("Failed to enable checkers for %s: %s", target.name, exc)
         return
 
+    logger.start_compile_jar(target.name)
     jar_path = project.compile_jar()
-    diff_tester = DifferentialTester(jar_path, project.base_dir, target.name)
+    logger.finish_compile_jar(target.name, jar_path)
 
+    diff_tester = DifferentialTester(jar_path, project.base_dir, target.name)
     for checker in checkers:
         logger.start_checker(target.name, checker)
         repo_dir = project.checkout_workspace(checker, checkers[0])
-        logger.log_setup_method(target.name, checker, project.checker_setup_type)
+
+        if checker != checkers[0]:
+            logger.log_setup_method(target.name, checker, project.checker_setup_type)
 
         errors = project.errors[:DRY_RUN_MAX_ERRORS] if dry_run else project.errors
         logger.log_total_errors(target.name, checker, len(project.errors))
@@ -131,7 +136,7 @@ def run(run_id: str, target: Target, checkers: list[str], logger: FPMinerLogger,
 
                     if result.refactor_run:
                         result_handler.handle_refactor_result(result.refactor_run, result.index)
-                        
+
         logger.finish_checker(checker)
 
     logger.finish_target(target.name)

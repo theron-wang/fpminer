@@ -1,23 +1,11 @@
 import os
 import shutil
-import subprocess
 from pathlib import Path
 from typing import Literal
 
 from checker_setup.main import setup_checker
+from java.fat_jar import build_gradle_jar, build_maven_jar
 from utils import find_build_system_file, replace_in_uncommitted_changes, CheckerError
-
-GRADLE_JAR_INIT_SCRIPT_PATH = Path("scripts") / "fpminer-fatjar.gradle"
-
-
-def _build_gradle_jar(directory: Path):
-    """Build the project's fpMiner-classified fat jar via an init script."""
-    subprocess.run(
-        ["./gradlew", "-I", GRADLE_JAR_INIT_SCRIPT_PATH, "fpMinerFatJar"],
-        cwd=directory,
-        check=True,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
 
 
 class TargetProject:
@@ -25,6 +13,7 @@ class TargetProject:
     errors: list[CheckerError]
     checker_setup_type: Literal["dljc", "analysisagent"]
     build_file: Path
+    jar_path: Path
 
     def __init__(self, target_name: str, target_url: str, checker: str):
         """
@@ -83,24 +72,22 @@ class TargetProject:
         replace_in_uncommitted_changes(search=checker_template, replace=checker, repo=repo_dir)
         return repo_dir
 
-    def compile_jar(self) -> Path:
+    def compile_jar(self):
         """
-        Compiles a fat jar for the current project. Returns the
-        path to the jar. May raise if the jarring did not work
+        Compiles a fat jar for the current project. Sets and returns the
+        path to the jar to jar_path. May raise if the jarring did not work
         for any reason.
         :return: The path to the fat jar
         """
         working_dir = self.build_file.parent
 
         if self.build_file.name == "pom.xml":
-            subprocess.run(["./mvnw", "package"], cwd=working_dir,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            candidates = list(working_dir.rglob("target/*.jar"))
+            candidates = build_maven_jar(self.build_file)
         else:
-            _build_gradle_jar(working_dir)
-            candidates = list(working_dir.rglob("build/libs/*-fpMiner.jar"))
+            candidates = build_gradle_jar(working_dir)
 
         if not candidates:
             raise FileNotFoundError(f"No jar found after build in {working_dir}")
 
-        return max(candidates, key=lambda p: p.stat().st_mtime)
+        self.jar_path = max(candidates, key=lambda p: p.stat().st_mtime)
+        return self.jar_path

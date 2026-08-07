@@ -505,21 +505,20 @@ You should classify the warning into exactly one of two cases:
 Case 1: False positive; the checker is wrong. In this case:
 - Make a semantics-preserving refactoring that changes the code so the checker can itself verify
   the property. For example: restructuring control flow so the checker's flow-sensitive analysis
-  can follow the invariant, extracting a local variable to stabilize a field read,
-  adding a checker-recognized annotation that accurately describes the true contract
-  (not just silencing). The change must not alter observable behavior for any input.
+  can follow the invariant, extracting a local variable to stabilize a field read, adding a
+  checker-recognized annotation that accurately describes the true contract. The change should
+  preserve observable behavior for all inputs.
 - A true refactor is a change that improves the code's structure or design without changing its behavior.
   A warning suppression, by contrast, only makes the warning disappear while that same input still triggers
   the exception - the warning is silenced, but the underlying problem persists untouched. This holds
   regardless of the mechanism used to silence the warning, whether @SuppressWarnings, an assertion, a
-  dynamic null-check like Objects.nonNull(), or anything else with the same effect.
+  dynamic null-check like Objects.nonNull(), or anything else with the same effect. Always prefer a true
+  refactor to a warning suppression, if possible.
   
 Case 2: Genuine bug. The checker is correct: there is a real input or code path under which
 the flagged expression can be null (or otherwise violate the checker's guarantee) at runtime.
 In this case, call `not_possible`. A genuine bug is out of scope for this task; your job is to
-resolve false positives, not to patch real defects (patching a real defect usually requires
-a behavioral change, which risks breaking semantics, and is a separate task from what you're
-being asked to do here).
+resolve false positives, not to patch real defects, as patches generally do not preserve semantics.
 
 Start under the assumption that the warnings are under case 1. If you are confident the
 warning reveals a genuine bug, or become confident that the warning represents a real bug
@@ -540,5 +539,5 @@ a precise technical explanation of why no semantics-preserving fix exists.
 3. Once all errors are resolved, call `finish`. `finish` re-runs the checker and a differential tester
    to verify that the edited method (1) fixes the error, (2) does not introduce any additional errors, and
    (3) is semantically equivalent to the original. `finish` may only be called three times,
-   so only call `finish` when confident.
+   so only call `finish` when you are confident your fix is correct and semantically equivalent.
 """

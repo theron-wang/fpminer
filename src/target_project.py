@@ -7,41 +7,17 @@ from typing import Literal
 from checker_setup.main import setup_checker
 from utils import find_build_system_file, replace_in_uncommitted_changes, CheckerError
 
-FAT_JAR_GRADLE_CONTENT = """allprojects {
-    afterEvaluate { project ->
-        if (project.plugins.hasPlugin("java")) {
-            project.tasks.register("fpMinerFatJar", Jar) {
-                archiveClassifier = "fpMiner"
-
-                duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-
-                from {
-                    project.configurations.runtimeClasspath
-                            .findAll { it.name.endsWith(".jar") }
-                            .collect { zipTree(it) }
-                }
-
-                from project.sourceSets.main.output
-            }
-        }
-    }
-}
-"""
+GRADLE_JAR_INIT_SCRIPT_PATH = Path("scripts") / "fpminer-fatjar.gradle"
 
 
 def _build_gradle_jar(directory: Path):
-    """Build the project's fpMiner-classified fat jar via a temporary init script."""
-    init_script = directory / "fpminer-fatjar.gradle"
-    init_script.write_text(FAT_JAR_GRADLE_CONTENT)
-    try:
-        subprocess.run(
-            ["./gradlew", "-I", "fpminer-fatjar.gradle", "fpMinerFatJar"],
-            cwd=directory,
-            check=True,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-    finally:
-        init_script.unlink(missing_ok=True)
+    """Build the project's fpMiner-classified fat jar via an init script."""
+    subprocess.run(
+        ["./gradlew", "-I", GRADLE_JAR_INIT_SCRIPT_PATH, "fpMinerFatJar"],
+        cwd=directory,
+        check=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
 
 
 class TargetProject:

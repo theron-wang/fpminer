@@ -1,0 +1,20 @@
+gradle.rootProject {
+    afterEvaluate { root ->
+        root.tasks.register("fpMinerFatJar", Jar) {
+            archiveClassifier = "fpMiner"
+            duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+            root.allprojects.findAll { it.plugins.hasPlugin("java") }.each { proj ->
+                dependsOn proj.tasks.named("classes")
+
+                from {
+                    proj.configurations.compileClasspath
+                            .findAll { it.name.endsWith(".jar") }
+                            .collect { zipTree(it) }
+                }
+
+                from proj.sourceSets.main.output
+            }
+        }
+    }
+}

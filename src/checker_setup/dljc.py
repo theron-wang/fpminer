@@ -5,12 +5,12 @@ import subprocess
 from pathlib import Path
 
 from checker_framework import get_path_to_checker_jar, get_path_to_checker_dir, get_path_to_dljc, get_javac_path
-from utils import run_checker_and_parse_errors, CheckerError
+from utils import run_checker_and_parse_errors, CheckerError, ensure_unbounded_diagnostics_and_cf_only_errors
 
 # DLJC cannot have compile be cached
 DLJC_BUILD_COMMANDS = [
     ["./gradlew", "compileJava", "--rerun-tasks"],
-    ["./mvnw", "clean", "compile"]
+    ["./mvnw", "clean", "compile", "-Dmaven.compiler.fork=true"]
 ]
 
 
@@ -34,7 +34,7 @@ def run_dljc(target_name: str, target_url: str, tool_name: str) -> list[CheckerE
     for build_command in DLJC_BUILD_COMMANDS:
         dljc_cmd = shlex.join(
             [str(dljc_path.resolve()), "--lib", str(get_path_to_checker_jar().resolve()), "-t", "print",
-             "--checker", tool_name, "--jdkVersion", "17", "--"] + build_command)
+             "--checker", tool_name, "--"] + build_command)
 
         javac_commands = _run_dljc_print(dljc_cmd, f"targets/{target_name}")
 
@@ -42,16 +42,16 @@ def run_dljc(target_name: str, target_url: str, tool_name: str) -> list[CheckerE
             continue
 
         output_cmd = " ; ".join([
-            _build_javac_command(javac_command, tool_name)
+            ensure_unbounded_diagnostics_and_cf_only_errors(_build_javac_command(javac_command, tool_name))
             for javac_command in javac_commands
         ])
 
         errors = run_checker_and_parse_errors(output_cmd, Path(f"targets/{target_name}"))
 
-        if errors:
-            return errors
+        if errors is None:
+            continue
 
-        return []
+        return errors
 
     return None
 

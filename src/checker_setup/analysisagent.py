@@ -1,8 +1,10 @@
 import io
+import multiprocessing
 import os
 import re
 import subprocess
 import tarfile
+from multiprocessing import Process
 from pathlib import Path
 from typing import IO, cast
 
@@ -15,21 +17,32 @@ from minisweagent.models.litellm_model import LitellmModel
 from tree_sitter import Language, Parser
 from utils import CheckerError, parse_errors_from_checker_output
 
-LOGS_ROOT = Path("analysis_agent_logs")
+ANALYSIS_AGENT_ROOT = Path("analysis_agent")
+ANALYSIS_AGENT_LOGS = ANALYSIS_AGENT_ROOT / "analysis_agent_logs"
+
+
+def _run_with_attempts_worker(kwargs, result_queue):
+    os.makedirs(ANALYSIS_AGENT_ROOT, exist_ok=True)
+    os.chdir(ANALYSIS_AGENT_ROOT)
+
+    model = LitellmModel(model_name=os.environ["EXEC_AGENT_MODEL"])
+    env = LocalEnvironment(cwd="analysis_agent_workspace")
+    result = run_with_attempts(model=model, env=env, **kwargs)
+    result_queue.put(result)
+
+
+def run_with_attempts_isolated(**kwargs):
+    ctx = multiprocessing.get_context("spawn")
+    q = ctx.Queue()
+    p = Process(target=_run_with_attempts_worker, args=(ANALYSIS_AGENT_ROOT, kwargs, q))
+    p.start()
+    p.join()
+    if p.exitcode != 0:
+        raise RuntimeError(f"analysis_agent subprocess failed (exit {p.exitcode})")
+    return q.get()
 
 
 def run_analysis_agent(target_name: str, target_url: str, tool_name: str, tool_url: str) -> list[CheckerError] | None:
-    # Run AnalysisAgent in a different directory, since its output is messy
-    current_dir = os.curdir
-    os.makedirs("analysis_agent", exist_ok=True)
-    try:
-        os.chdir(os.path.join(current_dir, "analysis_agent"))
-        return _run_analysis_agent(target_name, target_url, tool_name, tool_url)
-    finally:
-        os.chdir(current_dir)
-
-
-def _run_analysis_agent(target_name: str, target_url: str, tool_name: str, tool_url: str) -> list[CheckerError] | None:
     success = True
 
     if not os.path.exists(_get_target_directory(target_name)):
@@ -38,7 +51,7 @@ def _run_analysis_agent(target_name: str, target_url: str, tool_name: str, tool_
             cwd="analysis_agent_workspace",
         )
 
-        success, message = run_with_attempts(
+        success, message = run_with_attempts_isolated(
             model=model,
             env=env,
             tool_name=tool_name,
@@ -76,7 +89,7 @@ def _find_target_command_range(
     Parse `source` as a bash script and find the last `command` node whose text contains
     `tool_name`, descending into heredoc bodies (which tree-sitter-bash treats as opaque
     text rather than parsing structurally, since a heredoc's target may not even be a
-    shell) by re-parsing them as nested scripts.
+    shell) by reparsing them as nested scripts.
 
     Byte offsets in the return value are relative to the ORIGINAL top-level source, via
     `base_offset` — this stays correct because a heredoc body's bytes are copied verbatim
@@ -168,12 +181,12 @@ def _reconstruct(target_name: str, tool_name: str, output_dir: str) -> str:
     # {tool name}_{target name}_{timestamp}
 
     # We will try to find the max timestamp to get the most recent run
-    most_recent_log_path = max(f for f in os.listdir(LOGS_ROOT) if f.startswith(prefix))
+    most_recent_log_path = max(f for f in os.listdir(ANALYSIS_AGENT_LOGS) if f.startswith(prefix))
 
     if not most_recent_log_path:
         raise RuntimeError(f"No logs found for target {target_name} and tool {tool_name}")
 
-    most_recent_log_path = LOGS_ROOT / most_recent_log_path
+    most_recent_log_path = ANALYSIS_AGENT_LOGS / most_recent_log_path
 
     # All paths will be attempt_#/; get the last attempt
     last_attempt = max(f for f in os.listdir(most_recent_log_path) if f.startswith("attempt_"))

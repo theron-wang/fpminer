@@ -1,0 +1,5 @@
+allprojects {{
+    tasks.withType(JavaCompile).configureEach {{
+        options.compilerArgs.addAll(['-Xmaxwarns', '999999', '-Xmaxerrs', '999999', '-Xlint:none'])
+    }}
+}}

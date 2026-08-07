@@ -15,17 +15,49 @@ _number_regex = re.compile(r"\d+")
 
 _content_regex = re.compile(r"(?P<prefix>.*):\s*(?P<fields>.*)")
 
+_gradle_augment_script = Path("scripts") / "fpminer-javacompileaugment.gradle"
 
-def run_checker_and_parse_errors(checker_cmd: str, cwd: Path) -> list[CheckerError]:
+
+def ensure_unbounded_diagnostics_and_cf_only_errors(checker_cmd: str) -> str:
+    """
+    Ensures that any checker command ran with javac, gradlew, or mvnw
+    sets -Xmaxwarns and -Xmaxerrs to a very high number, so that we don't miss any errors.
+    Also sets -Xlint:none to avoid any javac warnings (like deprecation, unchecked, etc.)
+    :param checker_cmd: The checker command
+    :return: The checker command with the arguments added
+    """
+    if "gradlew" in checker_cmd:
+        return f"{checker_cmd} --init-script {_gradle_augment_script}"
+
+    if "mvnw" in checker_cmd:
+        arg = "-Xmaxwarns 999999 -Xmaxerrs 999999 -Xlint:none"
+        return f'{checker_cmd} -Dmaven.compiler.compilerArgument="{arg}"'
+
+    return f"{checker_cmd} -Xmaxwarns 999999 -Xmaxerrs 999999 -Xlint:none"
+
+
+def run_checker_and_parse_errors(checker_cmd: str, cwd: Path) -> list[CheckerError] | None:
+    """
+    Runs the checker and parses the errors, and returns a list of errors from its output.
+    May return None if the checker did not run successfully (error code != 0 and no errors)
+    :param checker_cmd: The checker command
+    :param cwd: The working directory
+    :return: The errors, or None if something failed
+    """
     result = subprocess.run(
-        checker_cmd,
+        ["bash"],
+        input=checker_cmd,
         capture_output=True,
         text=True,
-        shell=True,
-        cwd=cwd
+        cwd=cwd,
     )
+
     output = result.stderr
     errors = parse_errors_from_checker_output(output)
+
+    if not errors and result.returncode != 0:
+        return None
+
     return errors
 
 

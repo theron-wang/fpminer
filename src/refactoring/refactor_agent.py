@@ -18,7 +18,8 @@ from tenacity import (
     wait_exponential_jitter,
     before_sleep_log,
 )
-from utils import CheckerError, run_checker_and_parse_errors, find_source_dir, whitespace_flexible_pattern
+from utils import CheckerError, run_checker_and_parse_errors, find_source_dir, whitespace_flexible_pattern, \
+    ensure_unbounded_diagnostics_and_cf_only_errors
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,8 @@ class RefactorAgent:
         self.differential_tester = differential_tester
         self.path_to_full_project = path_to_full_project
 
-        self.run_checker_cmd = checker_framework.get_command_for_checker(checker_name, self.modified_directory)
+        self.run_checker_cmd = ensure_unbounded_diagnostics_and_cf_only_errors(
+            checker_framework.get_command_for_checker(checker_name, self.modified_directory))
         self.checker_name = checker_name.split('.')[-1]
         self.target_method_signature = target_method_signature
 
@@ -435,6 +437,7 @@ class RefactorAgent:
 
     def _run_checker(self) -> list[str]:
         errors = run_checker_and_parse_errors(self.run_checker_cmd, self.modified_directory)
+        assert errors is not None
         errors = [
             error.raw
             for error in errors

@@ -46,7 +46,7 @@ SPECIMIN=
 CHECKER_FRAMEWORK_VERSION=4.2.1
 
 # Maximum number of concurrent processes.
-# Default: os.cpu_count()
+# Default: os.process_cpu_count()
 MAX_PROCESSES=
 ```
 

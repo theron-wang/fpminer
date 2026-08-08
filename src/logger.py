@@ -196,6 +196,8 @@ class FPMinerLogger:
             with self._lock:
                 with open(path, "a", encoding="utf-8") as f:
                     f.write(block)
+        except KeyboardInterrupt:
+            raise
         except Exception:
             self.logger.exception("Failed to write log record to %s", path)
 

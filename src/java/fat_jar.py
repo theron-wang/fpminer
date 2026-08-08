@@ -48,6 +48,8 @@ def build_maven_jar(pom_xml_path: Path) -> list[Path]:
     finally:
         try:
             os.unlink(str(synthetic_pom))
+        except KeyboardInterrupt:
+            raise
         except Exception:
             pass
 

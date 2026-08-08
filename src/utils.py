@@ -1,6 +1,8 @@
 import os
 import re
 import subprocess
+import threading
+import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +18,21 @@ _number_regex = re.compile(r"\d+")
 _content_regex = re.compile(r"(?P<prefix>.*):\s*(?P<fields>.*)")
 
 _gradle_augment_script = Path("scripts") / "fpminer-javacompileaugment.gradle"
+
+
+def _watch_parent(orig_ppid, interval=1.0):
+    while True:
+        if os.getppid() != orig_ppid:
+            os._exit(1)
+        time.sleep(interval)
+
+
+def set_death_signal():
+    """Pool initializer: starts a background thread that exits this worker
+    if its parent process dies, since macOS has no PR_SET_PDEATHSIG."""
+    orig_ppid = os.getppid()
+    t = threading.Thread(target=_watch_parent, args=(orig_ppid,), daemon=True)
+    t.start()
 
 
 def ensure_unbounded_diagnostics_and_cf_only_errors(checker_cmd: str) -> str:

@@ -27,6 +27,8 @@ def run_analysis_agent(target_name: str, target_url: str, tool_name: str, tool_u
         checker_output = _reconstruct(target_name, tool_name, f"targets/{target_name}")
 
         return parse_errors_from_checker_output(checker_output)
+    except KeyboardInterrupt:
+        raise
     except Exception:
         pass
 
@@ -49,7 +51,8 @@ def run_analysis_agent(target_name: str, target_url: str, tool_name: str, tool_u
             "--disable-exit-attempt",
             "--docker-image", "ubuntu:22.04"
         ],
-        cwd=ANALYSIS_AGENT_ROOT
+        cwd=ANALYSIS_AGENT_ROOT,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
 
     if result.returncode != 0:
@@ -179,17 +182,14 @@ def _reconstruct(target_name: str, tool_name: str, output_dir: str) -> str:
     last_attempt = max(f for f in os.listdir(most_recent_log_path) if f.startswith("attempt_"))
     most_recent_log_path /= last_attempt
 
-    success = True
-
-    if not os.path.exists(_get_target_directory(target_name)):
-        success = produce_replay(
-            log_dir=most_recent_log_path,
-            output_dir=Path("replay"),
-            attempt_number=1,
-            tool_name=tool_name,
-            target_name=target_name,
-            require_successful_docker=True
-        )
+    success = produce_replay(
+        log_dir=most_recent_log_path,
+        output_dir=Path("replay"),
+        attempt_number=1,
+        tool_name=tool_name,
+        target_name=target_name,
+        require_successful_docker=True
+    )
 
     if not success:
         raise RuntimeError(f"Failed to produce replay for target {target_name} and tool {tool_name}")

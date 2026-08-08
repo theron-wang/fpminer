@@ -1,5 +1,3 @@
-import os
-import shutil
 from typing import Literal
 
 from checker_setup.analysisagent import run_analysis_agent
@@ -22,20 +20,11 @@ def setup_checker(target_name: str, target_url: str, tool_name: str) -> tuple[
     :param tool_name: The tool name
     :return: The errors found by the checker, or None if all failed
     """
-
-    already_existed = os.path.exists(f"targets/{target_name}")
-
     errors = run_dljc(target_name, target_url, tool_name)
 
     # dljc may run and give an empty list; in that case, it set up successfully but the
     # checker just didn't find any errors
     if errors is not None:
         return "dljc", errors
-
-    # dljc.py automatically clones the project. If the repository was already cloned before
-    # the dljc run, and dljc failed, that means that it is the artifact of a previous
-    # AnalysisAgent run and all we need to do is run the replay.
-    if not already_existed:
-        shutil.rmtree(f"targets/{target_name}")
 
     return "analysisagent", run_analysis_agent(target_name, target_url, tool_name, CF_URL)

@@ -3,9 +3,8 @@ from __future__ import annotations
 import faulthandler
 import json
 import os
+import signal
 import subprocess
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures._base import Future, as_completed
 from dataclasses import dataclass
 from multiprocessing import Pool
 from pathlib import Path
@@ -23,11 +22,13 @@ from more_itertools import first
 from refactoring.refactor_agent import RefactorAgent, RefactorAgentRun
 from refactoring.refactor_result_handler import RefactorResultHandler
 from target_project import TargetProject
-from utils import run_checker_and_parse_errors, CheckerError, timestamp, ensure_unbounded_diagnostics_and_cf_only_errors
+from utils import run_checker_and_parse_errors, CheckerError, timestamp, \
+    ensure_unbounded_diagnostics_and_cf_only_errors, set_death_signal
 
 DRY_RUN_MAX_ERRORS = 1
 
 faulthandler.enable()
+signal.signal(signal.SIGTERM, signal.default_int_handler)
 
 
 def ensure_posix_and_docker():
@@ -60,6 +61,12 @@ class ProcessResult:
     expected_error: CheckerError | None = None
     refactor_run: RefactorAgentRun | None = None
     exc: BaseException | None = None
+
+
+@dataclass
+class SetupFailure:
+    target_name: str
+    exc: Exception
 
 
 def _log_cf_error_refactor_result(logger: FPMinerLogger, project: TargetProject, result: ProcessResult) -> None:
@@ -99,10 +106,21 @@ def _log_cf_error_refactor_result(logger: FPMinerLogger, project: TargetProject,
 
 
 def _get_max_processes() -> int:
-    return int(os.getenv("MAX_PROCESSES", os.cpu_count() or 1))
+    return int(os.getenv("MAX_PROCESSES", os.process_cpu_count() or 1))
 
 
-def setup_checker_for_project(target: Target, checker: str, project: TargetProject | None, checker_template: str):
+def _setup_checker_for_project_star(args: tuple) -> TargetProject | SetupFailure:
+    try:
+        return setup_checker_for_project(*args)
+    except KeyboardInterrupt:
+        raise
+    except Exception as exc:
+        target, _, _, _ = args
+        return SetupFailure(target, exc)
+
+
+def setup_checker_for_project(target: Target, checker: str, project: TargetProject | None,
+                              checker_template: str) -> TargetProject:
     if project:
         project.checkout_workspace(checker, checker_template)
         return project
@@ -128,14 +146,19 @@ def run_for_single_checker_target_pair(run_id: str, project: TargetProject, chec
 
     repo_dir = project.get_current_workspace_repo_dir()
 
-    with Pool(processes=_get_max_processes()) as pool:
+    with Pool(processes=_get_max_processes(), initializer=set_death_signal) as pool:
         args = [(i, e, project, repo_dir, diff_tester) for i, e in enumerate(errors)]
 
-        for result in pool.imap_unordered(_process_one_error_star, args):
-            _log_cf_error_refactor_result(logger, project, result)
+        try:
+            for result in pool.imap_unordered(_process_one_error_star, args):
+                _log_cf_error_refactor_result(logger, project, result)
 
-            if result.refactor_run:
-                result_handler.handle_refactor_result(result.refactor_run, result.index)
+                if result.refactor_run:
+                    result_handler.handle_refactor_result(result.refactor_run, result.index)
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            logger.log_crash(scope="error", target_name=project.target_name, exc=exc)
 
     logger.finish_target(project.target_name)
 
@@ -190,6 +213,8 @@ def process_one_error(index: int, error: CheckerError, project: TargetProject, r
         return ProcessResult(index=index + 1, outcome="success",
                              specimin_cmd=executed_specimin_cmd, refactor_run=result)
 
+    except KeyboardInterrupt:
+        raise
     except Exception as exc:
         return ProcessResult(index=index + 1, outcome="crash", exc=exc)
 
@@ -235,12 +260,18 @@ def main():
 
     # AnalysisAgent requires the unix shell + docker
     ensure_posix_and_docker()
-    specimin.setup()
-    checker_framework.setup()
-    differential_tester.setup()
 
     run_id = timestamp()
     logger = FPMinerLogger(run_id)
+
+    try:
+        specimin.setup()
+        checker_framework.setup()
+        differential_tester.setup()
+    except Exception as exc:
+        logger.log_crash(scope="pipeline_setup", target_name="<setup>", exc=exc)
+        logger.finalize()
+        exit(1)
 
     projects: dict[str, TargetProject] = {}
     diff_testers: dict[str, DifferentialTester] = {}
@@ -249,29 +280,28 @@ def main():
     for checker in checkers:
         logger.start_checker(checker)
 
-        with ThreadPoolExecutor(max_workers=_get_max_processes()) as pool:
-            futures: dict[Future[TargetProject], Target] = {}
+        with Pool(processes=_get_max_processes(), initializer=set_death_signal) as pool:
+            setup_args = [(target, checker, projects.get(target.name, None), checkers[0]) for target in targets]
 
-            for target in targets:
-                futures[pool.submit(
-                    setup_checker_for_project, target, checker, projects.get(target.name, None), checkers[0]
-                )] = target
-
-            for future in as_completed(futures):
-                target = futures[future]
-                try:
-                    project = future.result()
-                except Exception as exc:
-                    logger.log_crash(scope="target_setup", target_name=target.name, exc=exc)
+            for project in pool.imap_unordered(_setup_checker_for_project_star, setup_args):
+                if isinstance(project, SetupFailure):
+                    logger.log_crash(scope="target_setup", target_name=project.target_name, exc=project.exc)
                     continue
 
-                logger.log_setup_method(target.name, checker, project.checker_setup_type)
+                logger.log_setup_method(project.target_name, checker, project.checker_setup_type)
 
-                curr_proj = projects.get(target.name, None)
+                curr_proj = projects.get(project.target_name, None)
 
                 if not curr_proj:
-                    projects[target.name] = project
-                    diff_testers[target.name] = DifferentialTester(project.jar_path, project.base_dir, target.name)
+                    projects[project.target_name] = project
+
+                    try:
+                        diff_testers[project.target_name] = DifferentialTester(project.jar_path, project.base_dir,
+                                                                               project.target_name)
+                    except KeyboardInterrupt:
+                        raise
+                    except Exception as exc:
+                        logger.log_crash(scope="target_setup", target_name=project.target_name, exc=exc)
 
         if not args.setup_only:
             for target in targets:
@@ -279,6 +309,8 @@ def main():
                     run_for_single_checker_target_pair(run_id, projects[target.name], checker, logger,
                                                        diff_testers[target.name],
                                                        dry_run=args.dry_run)
+                except KeyboardInterrupt:
+                    raise
                 except Exception as exc:
                     logger.log_crash(scope="target", target_name=target.name, exc=exc)
 

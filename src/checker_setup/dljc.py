@@ -13,6 +13,11 @@ DLJC_BUILD_COMMANDS = [
     ["./mvnw", "clean", "compile", "-Dmaven.compiler.fork=true"]
 ]
 
+# Stores whether a target ran successfully with dljc or not. This avoids
+# future attempts on different checkers; if dljc does not work with one
+# checker, it will not work with others.
+TARGET_DLJC_CACHE: dict[str, bool] = {}
+
 
 def run_dljc(target_name: str, target_url: str, tool_name: str) -> list[CheckerError] | None:
     """
@@ -23,6 +28,9 @@ def run_dljc(target_name: str, target_url: str, tool_name: str) -> list[CheckerE
     :param tool_name: The tool name
     :return: A list of errors, or None if unsuccessful
     """
+    if TARGET_DLJC_CACHE.get(target_name) is False:
+        return None
+
     if not os.path.exists(f"targets/{target_name}"):
         _clone_target(target_name, target_url)
 
@@ -51,13 +59,18 @@ def run_dljc(target_name: str, target_url: str, tool_name: str) -> list[CheckerE
         if errors is None:
             continue
 
+        TARGET_DLJC_CACHE[target_name] = True
         return errors
 
+    TARGET_DLJC_CACHE[target_name] = False
     return None
 
 
 def _run_dljc_print(dljc_cmd: str, cwd: str) -> list[dict] | None:
-    result = subprocess.run(dljc_cmd, cwd=cwd, capture_output=True, text=True, check=False, shell=True)
+    result = subprocess.run(dljc_cmd, cwd=cwd, capture_output=True, text=True, shell=True)
+    if result.returncode != 0:
+        return None
+
     json_start = result.stdout.find("{")
     if json_start == -1:
         return None

@@ -1,9 +1,9 @@
 [project]
 name = "false-positives-miner"
 version = "0.1.0"
-description = "Add your description here"
+description = "An automated pipeline for mining Checker Framework false positive patterns across Java repositories."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 dependencies = [
     "argparse>=1.4.0",
     "dotenv>=0.9.9",

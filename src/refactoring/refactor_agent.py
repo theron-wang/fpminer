@@ -397,6 +397,8 @@ class RefactorAgent:
         except RefactorAgentTermination:
             # Session completed when we wanted it to
             pass
+        except KeyboardInterrupt:
+            raise
         except Exception as e:
             result.modified_content = self._get_current_target_method_content()
             result.error = f"Agent run failed or exhausted limits: {type(e).__name__}: {e}"

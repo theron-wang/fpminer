@@ -12,7 +12,7 @@ dependencies = [
     "software-analysis-agent",
     "tree-sitter",
     "tree-sitter-bash>=0.25.1",
-    "tree-sitter-java>=0.23.5",
+    "tree-sitter-java>=0.23.5"
 ]
 
 [tool.uv.sources]

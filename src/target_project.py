@@ -29,6 +29,9 @@ class TargetProject:
 
         self.checkout_workspace(checker, checker)
 
+    def get_current_workspace_repo_dir(self) -> Path:
+        return Path(f"workspace/{self.target_name}/{self.active_checker}/{self.target_name}")
+
     def checkout_workspace(self, checker: str, checker_template: str) -> Path:
         """
         Checks out and sets up a workspace for the given checker. Checker

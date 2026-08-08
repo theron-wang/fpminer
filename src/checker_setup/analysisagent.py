@@ -1,71 +1,58 @@
 import io
-import multiprocessing
 import os
 import re
 import subprocess
+import sys
 import tarfile
-from multiprocessing import Process
 from pathlib import Path
 from typing import IO, cast
 
 import docker
 import tree_sitter_bash
-from analysis_agent.mini_orchestrator import sanitize_for_filename, run_with_attempts
+from analysis_agent.mini_orchestrator import sanitize_for_filename
 from analysis_agent.replay_producer import produce_replay
-from minisweagent.environments.local import LocalEnvironment
-from minisweagent.models.litellm_model import LitellmModel
 from tree_sitter import Language, Parser
 from utils import CheckerError, parse_errors_from_checker_output
 
 ANALYSIS_AGENT_ROOT = Path("analysis_agent")
-ANALYSIS_AGENT_LOGS = ANALYSIS_AGENT_ROOT / "analysis_agent_logs"
+ANALYSIS_AGENT_LOGS = ANALYSIS_AGENT_ROOT / "logs"
+REPLAY_CWD_REGEX = re.compile(r"^log_info 'Working directory: (?P<cwd>.*)'$")
 
 
-def _run_with_attempts_worker(kwargs, result_queue):
+def run_analysis_agent(target_name: str, target_url: str, tool_name: str, tool_url: str) -> \
+        (list[CheckerError] | None):
+    # Try reconstructing first; if it fails, it's probably a stale directory from
+    # a failed earlier attempt, and we'll try again.
+    try:
+        checker_output = _reconstruct(target_name, tool_name, f"targets/{target_name}")
+
+        return parse_errors_from_checker_output(checker_output)
+    except Exception:
+        pass
+
     os.makedirs(ANALYSIS_AGENT_ROOT, exist_ok=True)
-    os.chdir(ANALYSIS_AGENT_ROOT)
 
-    model = LitellmModel(model_name=os.environ["EXEC_AGENT_MODEL"])
-    env = LocalEnvironment(cwd="analysis_agent_workspace")
-    result = run_with_attempts(model=model, env=env, **kwargs)
-    result_queue.put(result)
+    # Run with Ubuntu 22.04, or else AnalysisAgent will fail to create a Docker container under this venv
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "analysis_agent.main",
+            "--tool-name", tool_name,
+            "--tool-url", tool_url,
+            "--target-name", target_name,
+            "--target-url", target_url,
+            "--model", os.environ["EXEC_AGENT_MODEL"],
+            "--max-attempts", "3",
+            "--cycle-budget", "40",
+            "--time-limit-seconds", "10800",
+            "--disable-exit-attempt",
+            "--docker-image", "ubuntu:22.04"
+        ],
+        cwd=ANALYSIS_AGENT_ROOT
+    )
 
-
-def run_with_attempts_isolated(**kwargs):
-    ctx = multiprocessing.get_context("spawn")
-    q = ctx.Queue()
-    p = Process(target=_run_with_attempts_worker, args=(ANALYSIS_AGENT_ROOT, kwargs, q))
-    p.start()
-    p.join()
-    if p.exitcode != 0:
-        raise RuntimeError(f"analysis_agent subprocess failed (exit {p.exitcode})")
-    return q.get()
-
-
-def run_analysis_agent(target_name: str, target_url: str, tool_name: str, tool_url: str) -> list[CheckerError] | None:
-    success = True
-
-    if not os.path.exists(_get_target_directory(target_name)):
-        model = LitellmModel(model_name=os.environ["EXEC_AGENT_MODEL"])
-        env = LocalEnvironment(
-            cwd="analysis_agent_workspace",
-        )
-
-        success, message = run_with_attempts_isolated(
-            model=model,
-            env=env,
-            tool_name=tool_name,
-            tool_url=tool_url,
-            target_name=target_name,
-            target_url=target_url,
-            max_attempts=3,
-            cycle_budget=40,
-            mode="auto",
-            time_limit_seconds=10800,
-            enable_exit_attempt=False
-        )
-
-    if not success:
+    if result.returncode != 0:
         return None
 
     # AnalysisAgent automatically cleans up the Docker container after execution,
@@ -210,9 +197,12 @@ def _reconstruct(target_name: str, tool_name: str, output_dir: str) -> str:
     replay_dir = Path("replay") / last_attempt
     replay_sh_path = Path(replay_dir).absolute() / "replay.sh"
 
+    working_dir = REPLAY_CWD_REGEX.search(replay_sh_path.read_text()).group("cwd")
+    working_dir = Path(working_dir)
+
     # Write into /app so it gets pulled out along with the rest of the archive below
-    classpath_output_path = f"/app/{classpath_filename}"
-    instrumented_replay_sh = _instrument_replay_for_output(replay_sh_path, tool_name, classpath_output_path)
+    classpath_output_path = working_dir / classpath_filename
+    instrumented_replay_sh = _instrument_replay_for_output(replay_sh_path, tool_name, str(classpath_output_path))
 
     result = subprocess.run(["./launch.sh", "--build"], capture_output=True, text=True, check=True, cwd=replay_dir)
 
@@ -225,7 +215,7 @@ def _reconstruct(target_name: str, tool_name: str, output_dir: str) -> str:
     client = docker.from_env()
     os.makedirs(output_dir, exist_ok=True)
 
-    container = client.containers.run(
+    container = client.containers.run_for_single_checker_target_pair(
         image=image_name,
         detach=True,
         entrypoint=["/bin/bash", "/replay.sh"],
@@ -240,7 +230,7 @@ def _reconstruct(target_name: str, tool_name: str, output_dir: str) -> str:
     container.wait()
 
     try:
-        bits, _ = container.get_archive("/app")
+        bits, _ = container.get_archive(working_dir)
 
         tar_stream = io.BytesIO()
         for chunk in bits:
@@ -253,7 +243,7 @@ def _reconstruct(target_name: str, tool_name: str, output_dir: str) -> str:
         container.remove(force=True)
         client.images.remove(image_name, force=True)
 
-    extracted_classpath_path = Path(output_dir) / "app" / classpath_filename
+    extracted_classpath_path = Path(output_dir) / str(working_dir).strip('/') / classpath_filename
     if not extracted_classpath_path.exists():
         raise RuntimeError(
             f"Expected {classpath_filename} was not found in extracted output at {extracted_classpath_path}"

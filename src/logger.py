@@ -202,24 +202,18 @@ class FPMinerLogger:
     # ------------------------------------------------------------------ #
     # target / checker / error lifecycle
     # ------------------------------------------------------------------ #
-    def start_target(self, target_name: str) -> None:
-        self.logger.info("%s Starting target: %s %s", "=" * 20, target_name, "=" * 20)
-
-    def finish_target(self, target_name: str) -> None:
-        self.logger.info("%s Finished target: %s %s", "=" * 20, target_name, "=" * 20)
-
-    def start_compile_jar(self, target_name: str) -> None:
-        self.logger.info("Starting compile JAR: %s", target_name)
-
-    def finish_compile_jar(self, target_name: str, jar_path: Path) -> None:
-        self.logger.info("Finished compile JAR: %s. Output: %s", target_name, jar_path.resolve())
-
-    def start_checker(self, target_name: str, checker: str) -> None:
-        self._bump(target_name, checker, "total_errors", amount=0)
+    def start_checker(self, checker: str) -> None:
         self.logger.info("%s Starting checker: %s %s", "=" * 20, checker, "=" * 20)
 
     def finish_checker(self, checker: str) -> None:
         self.logger.info("%s Finished checker: %s %s", "=" * 20, checker, "=" * 20)
+
+    def start_target(self, target_name: str, checker: str) -> None:
+        self._bump(target_name, checker, "total_errors", amount=0)
+        self.logger.info("%s Starting target: %s %s", "=" * 20, target_name, "=" * 20)
+
+    def finish_target(self, target_name: str) -> None:
+        self.logger.info("%s Finished target: %s %s", "=" * 20, target_name, "=" * 20)
 
     def log_setup_method(self, target_name: str, checker: str, method: str) -> None:
         """Records how this (target, checker) pair's environment was set up
@@ -231,7 +225,7 @@ class FPMinerLogger:
         with self._lock:
             counts = self._get_counts(target_name, checker)
             counts["setup_method"] = method
-        self.logger.info("[%s/%s] Setup method: %s", target_name, checker, method)
+        self.logger.info("[%s/%s] Setup complete using: %s", target_name, checker, method)
 
     def log_total_errors(self, target_name: str, checker: str, total: int) -> None:
         """Records the total number of errors to be processed for this

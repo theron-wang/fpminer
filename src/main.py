@@ -4,6 +4,8 @@ import faulthandler
 import json
 import os
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures._base import Future, as_completed
 from dataclasses import dataclass
 from multiprocessing import Pool
 from pathlib import Path
@@ -23,7 +25,7 @@ from refactoring.refactor_result_handler import RefactorResultHandler
 from target_project import TargetProject
 from utils import run_checker_and_parse_errors, CheckerError, timestamp, ensure_unbounded_diagnostics_and_cf_only_errors
 
-DRY_RUN_MAX_ERRORS = 3
+DRY_RUN_MAX_ERRORS = 1
 
 faulthandler.enable()
 
@@ -60,7 +62,7 @@ class ProcessResult:
     exc: BaseException | None = None
 
 
-def _log_result(logger: FPMinerLogger, project: TargetProject, result: ProcessResult) -> None:
+def _log_cf_error_refactor_result(logger: FPMinerLogger, project: TargetProject, result: ProcessResult) -> None:
     """Runs only in the main process. Dispatches a completed worker's
     ProcessResult to the matching FPMinerLogger call(s), as each result
     streams back from the pool -- so logging happens as errors finish
@@ -96,50 +98,46 @@ def _log_result(logger: FPMinerLogger, project: TargetProject, result: ProcessRe
         logger.logger.error("Unknown ProcessResult outcome %r for error %d", result.outcome, index)
 
 
-def run(run_id: str, target: Target, checkers: list[str], logger: FPMinerLogger, dry_run: bool = False,
-        setup_only: bool = False):
-    """Process one target repository against all configured checkers.
+def _get_max_processes() -> int:
+    return int(os.getenv("MAX_PROCESSES", os.cpu_count() or 1))
+
+
+def setup_checker_for_project(target: Target, checker: str, project: TargetProject | None, checker_template: str):
+    if project:
+        project.checkout_workspace(checker, checker_template)
+        return project
+
+    project = TargetProject(target.name, target.url, checker)
+    project.compile_jar()
+    return project
+
+
+def run_for_single_checker_target_pair(run_id: str, project: TargetProject, checker: str, logger: FPMinerLogger,
+                                       diff_tester: DifferentialTester, dry_run: bool = False):
+    """Process one target repository against one checker.
 
     If dry_run is True, each target/checker pair is capped at
-    DRY_RUN_MAX_ERRORS errors so the pipeline can be smoke-tested quickly."""
-    logger.start_target(target.name)
+    DRY_RUN_MAX_ERRORS errors so the pipeline can be smoke-tested quickly.
 
-    try:
-        project = TargetProject(target.name, target.url, checkers[0])
-        logger.log_setup_method(target.name, checkers[0], project.checker_setup_type)
-    except ValueError as exc:
-        logger.logger.error("Failed to enable checkers for %s: %s", target.name, exc)
-        return
+    This method is not safe to parallelize. It parallelizes within."""
 
-    logger.start_compile_jar(target.name)
-    jar_path = project.compile_jar()
-    logger.finish_compile_jar(target.name, jar_path)
+    logger.start_target(project.target_name, checker)
+    errors = project.errors[:DRY_RUN_MAX_ERRORS] if dry_run else project.errors
+    logger.log_total_errors(project.target_name, checker, len(project.errors))
+    result_handler = RefactorResultHandler(run_id, project.target_name, checker)
 
-    diff_tester = DifferentialTester(jar_path, project.base_dir, target.name)
-    for checker in checkers:
-        logger.start_checker(target.name, checker)
-        repo_dir = project.checkout_workspace(checker, checkers[0])
+    repo_dir = project.get_current_workspace_repo_dir()
 
-        if checker != checkers[0]:
-            logger.log_setup_method(target.name, checker, project.checker_setup_type)
+    with Pool(processes=_get_max_processes()) as pool:
+        args = [(i, e, project, repo_dir, diff_tester) for i, e in enumerate(errors)]
 
-        errors = project.errors[:DRY_RUN_MAX_ERRORS] if dry_run else project.errors
-        logger.log_total_errors(target.name, checker, len(project.errors))
-        result_handler = RefactorResultHandler(run_id, target.name, checker)
+        for result in pool.imap_unordered(_process_one_error_star, args):
+            _log_cf_error_refactor_result(logger, project, result)
 
-        if not setup_only:
-            with Pool(processes=int(os.getenv("MAX_PROCESSES", os.cpu_count() or 1))) as pool:
-                args = [(i, e, project, repo_dir, diff_tester) for i, e in enumerate(errors)]
+            if result.refactor_run:
+                result_handler.handle_refactor_result(result.refactor_run, result.index)
 
-                for result in pool.imap_unordered(_process_one_error_star, args):
-                    _log_result(logger, project, result)
-
-                    if result.refactor_run:
-                        result_handler.handle_refactor_result(result.refactor_run, result.index)
-
-        logger.finish_checker(checker)
-
-    logger.finish_target(target.name)
+    logger.finish_target(project.target_name)
 
 
 def _process_one_error_star(args: tuple) -> ProcessResult:
@@ -244,11 +242,47 @@ def main():
     run_id = timestamp()
     logger = FPMinerLogger(run_id)
 
-    for target in targets:
-        try:
-            run(run_id, target, checkers, logger, dry_run=args.dry_run, setup_only=args.setup_only)
-        except Exception as exc:
-            logger.log_crash(scope="target", target_name=target.name, exc=exc)
+    projects: dict[str, TargetProject] = {}
+    diff_testers: dict[str, DifferentialTester] = {}
+
+    # Parallelize checker setup, then parallelize errors in each target/checker pair
+    for checker in checkers:
+        logger.start_checker(checker)
+
+        with ThreadPoolExecutor(max_workers=_get_max_processes()) as pool:
+            futures: dict[Future[TargetProject], Target] = {}
+
+            for target in targets:
+                futures[pool.submit(
+                    setup_checker_for_project, target, checker, projects.get(target.name, None), checkers[0]
+                )] = target
+
+            for future in as_completed(futures):
+                target = futures[future]
+                try:
+                    project = future.result()
+                except Exception as exc:
+                    logger.log_crash(scope="target_setup", target_name=target.name, exc=exc)
+                    continue
+
+                logger.log_setup_method(target.name, checker, project.checker_setup_type)
+
+                curr_proj = projects.get(target.name, None)
+
+                if not curr_proj:
+                    projects[target.name] = project
+                    diff_testers[target.name] = DifferentialTester(project.jar_path, project.base_dir, target.name)
+
+        if not args.setup_only:
+            for target in targets:
+                try:
+                    run_for_single_checker_target_pair(run_id, projects[target.name], checker, logger,
+                                                       diff_testers[target.name],
+                                                       dry_run=args.dry_run)
+                except Exception as exc:
+                    logger.log_crash(scope="target", target_name=target.name, exc=exc)
+
+        logger.finish_checker(checker)
 
     logger.finalize()
 

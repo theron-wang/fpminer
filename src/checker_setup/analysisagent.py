@@ -31,7 +31,6 @@ def run_analysis_agent(target_name: str, target_url: str, tool_name: str, tool_u
     except KeyboardInterrupt:
         raise
     except Exception:
-        raise
         pass
 
     os.makedirs(ANALYSIS_AGENT_ROOT, exist_ok=True)
@@ -125,7 +124,8 @@ def _find_target_command_range(
     return matches[-1]
 
 
-def _instrument_replay_for_output(path_to_replay_sh: Path, tool_name: str, output_path: str) -> Path:
+def _instrument_replay_for_output(path_to_replay_sh: Path, orig_tool_name: str, new_tool_name: str,
+                                  output_path: str) -> Path:
     """
     Rewrite replay.sh so that the command running the annotation processor for `tool_name`
     also redirects its stderr to `output_path` (a path inside the container).
@@ -140,10 +140,10 @@ def _instrument_replay_for_output(path_to_replay_sh: Path, tool_name: str, outpu
     with open(path_to_replay_sh, 'rb') as f:
         source = f.read()
 
-    target_range = _find_target_command_range(source, 0, tool_name, bash_lang)
+    target_range = _find_target_command_range(source, 0, orig_tool_name, bash_lang)
 
     if target_range is None:
-        raise RuntimeError(f"Could not find a command referencing {tool_name} in {path_to_replay_sh}")
+        raise RuntimeError(f"Could not find a command referencing {orig_tool_name} in {path_to_replay_sh}")
 
     _, target_end = target_range
 
@@ -151,6 +151,7 @@ def _instrument_replay_for_output(path_to_replay_sh: Path, tool_name: str, outpu
     # inside a heredoc), without changing what the command otherwise does.
     redirect = f" 2> {output_path}".encode("utf-8")
     instrumented_source = source[:target_end] + redirect + source[target_end:]
+    instrumented_source = instrumented_source.replace(orig_tool_name.encode("utf-8"), new_tool_name.encode("utf-8"))
 
     instrumented_path = path_to_replay_sh.with_name(
         f"{path_to_replay_sh.stem}.instrumented{path_to_replay_sh.suffix}"
@@ -162,23 +163,23 @@ def _instrument_replay_for_output(path_to_replay_sh: Path, tool_name: str, outpu
 
 
 def _reconstruct(target_name: str, tool_name: str, output_dir: str) -> str:
-    extracted_errors_filename = "fp-miner-classpath.txt"
-
-    existing_classpath_file = _get_target_directory(target_name) / extracted_errors_filename
-    if os.path.exists(existing_classpath_file):
-        with open(existing_classpath_file, "r") as f:
-            return f.read()
-
-    prefix = f"{sanitize_for_filename(tool_name)}_{sanitize_for_filename(target_name)}"
+    extracted_errors_filename = "fpminer-extracted-errors.txt"
 
     # logs directory contains paths like this:
     # {tool name}_{target name}_{timestamp}
 
+    target_dir_section = f"_{sanitize_for_filename(target_name)}_"
+
     # We will try to find the max timestamp to get the most recent run
-    most_recent_log_path = max(f for f in os.listdir(ANALYSIS_AGENT_LOGS) if f.startswith(prefix))
+    most_recent_log_path = max(
+        (f for f in os.listdir(ANALYSIS_AGENT_LOGS) if target_dir_section in f),
+        key=lambda f: int(f.rsplit("_", 1)[-1])
+    )
 
     if not most_recent_log_path:
-        raise RuntimeError(f"No logs found for target {target_name} and tool {tool_name}")
+        raise RuntimeError(f"No logs found for target {target_name}")
+
+    orig_checker = most_recent_log_path.split('_')[0]
 
     most_recent_log_path = ANALYSIS_AGENT_LOGS / most_recent_log_path
 
@@ -195,7 +196,7 @@ def _reconstruct(target_name: str, tool_name: str, output_dir: str) -> str:
         log_dir=most_recent_log_path,
         output_dir=replay_output_dir,
         attempt_number=1,
-        tool_name=tool_name,
+        tool_name=orig_checker,
         target_name=target_name,
         require_successful_docker=False
     )
@@ -211,8 +212,9 @@ def _reconstruct(target_name: str, tool_name: str, output_dir: str) -> str:
     working_dir = Path(working_dir)
 
     # Write into /app so it gets pulled out along with the rest of the archive below
-    classpath_output_path = working_dir / extracted_errors_filename
-    instrumented_replay_sh = _instrument_replay_for_output(replay_sh_path, tool_name, str(classpath_output_path))
+    extracted_errors_output_path = working_dir / extracted_errors_filename
+    instrumented_replay_sh = _instrument_replay_for_output(replay_sh_path, orig_checker, tool_name,
+                                                           str(extracted_errors_output_path))
 
     result = subprocess.run(["./launch.sh", "--build"], capture_output=True, text=True, check=True, cwd=replay_dir)
 

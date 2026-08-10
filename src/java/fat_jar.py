@@ -1,9 +1,8 @@
-import os
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-GRADLE_JAR_INIT_SCRIPT_PATH = Path("scripts") / "fpminer-fatjar.gradle"
+GRADLE_JAR_INIT_SCRIPT_PATH = (Path("scripts") / "fpminer-fatjar.gradle").resolve()
 
 
 def build_gradle_jar(directory: Path) -> list[Path]:
@@ -36,21 +35,13 @@ def build_maven_jar(pom_xml_path: Path) -> list[Path]:
     synthetic_pom = project_dir / "pom-fpMiner.xml"
     _write_fatjar_pom(synthetic_pom, gavs)
 
-    try:
-        subprocess.run(
-            ["./mvnw", "-f", synthetic_pom.name, "package"],
-            cwd=project_dir,
-            check=True,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        return list(project_dir.rglob("target/*-fpMiner.jar"))
-    finally:
-        try:
-            os.unlink(str(synthetic_pom))
-        except KeyboardInterrupt:
-            raise
-        except Exception:
-            pass
+    subprocess.run(
+        ["./mvnw", "-f", synthetic_pom.name, "package", "-Dmaven.test.skip=true"],
+        cwd=project_dir,
+        check=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    return list(project_dir.rglob("target/*-fpMiner.jar"))
 
 
 FATJAR_POM_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>

@@ -3,7 +3,6 @@ from __future__ import annotations
 import faulthandler
 import json
 import os
-import signal
 import subprocess
 from dataclasses import dataclass
 from multiprocessing import Pool
@@ -23,12 +22,11 @@ from refactoring.refactor_agent import RefactorAgent, RefactorAgentRun
 from refactoring.refactor_result_handler import RefactorResultHandler
 from target_project import TargetProject
 from utils import run_checker_and_parse_errors, CheckerError, timestamp, \
-    ensure_unbounded_diagnostics_and_cf_only_errors, set_death_signal
+    ensure_unbounded_diagnostics_and_cf_only_errors
 
 DRY_RUN_MAX_ERRORS = 1
 
 faulthandler.enable()
-signal.signal(signal.SIGTERM, signal.default_int_handler)
 
 
 def ensure_posix_and_docker():
@@ -146,7 +144,7 @@ def run_for_single_checker_target_pair(run_id: str, project: TargetProject, chec
 
     repo_dir = project.get_current_workspace_repo_dir()
 
-    with Pool(processes=_get_max_processes(), initializer=set_death_signal) as pool:
+    with Pool(processes=_get_max_processes()) as pool:
         args = [(i, e, project, repo_dir, diff_tester) for i, e in enumerate(errors)]
 
         try:
@@ -251,7 +249,7 @@ def main():
         exit(1)
 
     with open(args.checkers) as f:
-        checkers = [line.strip() for line in f.readlines()]
+        checkers = [line.strip() for line in f.readlines() if line]
 
     with open(args.targets) as f:
         targets = [Target(**json.loads(line)) for line in f if line.strip() and not line.startswith("//")]
@@ -280,7 +278,7 @@ def main():
     for checker in checkers:
         logger.start_checker(checker)
 
-        with Pool(processes=_get_max_processes(), initializer=set_death_signal) as pool:
+        with Pool(processes=_get_max_processes()) as pool:
             setup_args = [(target, checker, projects.get(target.name, None), checkers[0]) for target in targets]
 
             for project in pool.imap_unordered(_setup_checker_for_project_star, setup_args):

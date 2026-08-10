@@ -2,6 +2,8 @@ gradle.rootProject {
     afterEvaluate { root ->
         root.tasks.register("fpMinerFatJar", Jar) {
             archiveClassifier = "fpMiner"
+            archiveBaseName = root.name
+            destinationDirectory = root.layout.buildDirectory.dir("libs")
             duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 
             root.allprojects.findAll { it.plugins.hasPlugin("java") }.each { proj ->

@@ -19,8 +19,7 @@ def build_gradle_jar(directory: Path) -> list[Path]:
 
 def build_maven_jar(pom_xml_path: Path) -> list[Path]:
     """Build a single fpMiner-classified fat jar containing every jar-packaged
-    module reachable (recursively) from pom_xml_path, mirroring the Gradle
-    task's sweep over allprojects with the java plugin."""
+    module reachable from pom.xml."""
     project_dir = pom_xml_path.parent
 
     subprocess.run(
@@ -30,7 +29,7 @@ def build_maven_jar(pom_xml_path: Path) -> list[Path]:
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
 
-    gavs = _discover_jar_modules(pom_xml_path)
+    gavs = _discover_jar_modules(pom_xml_path, project_dir)
     if not gavs:
         raise RuntimeError(f"No jar-packaged modules found under {pom_xml_path}")
 
@@ -120,36 +119,37 @@ def _child_text(elem: ET.Element, name: str) -> str | None:
     return None
 
 
-def _resolve_gav(pom_path: Path) -> tuple[str | None, str | None, str | None, str]:
-    """Returns (groupId, artifactId, version, packaging), following <parent>
-    inheritance on disk when a field isn't declared locally."""
-    root = ET.parse(pom_path).getroot()
+def _resolve_gav(pom_path: Path, project_dir: Path) -> tuple[str | None, str | None, str | None, str]:
+    """Returns (groupId, artifactId, version, packaging) from the effective POM,
+    i.e. with parent inheritance, profiles, and property substitution already
+    applied by Maven itself."""
+    result = subprocess.run(
+        ["./mvnw", "help:effective-pom", "-q", "-f", str(pom_path.resolve()), "-Doutput=/dev/stdout"],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=project_dir
+    )
 
-    group_id = _child_text(root, "groupId")
-    artifact_id = _child_text(root, "artifactId")
-    version = _child_text(root, "version")
-    packaging = _child_text(root, "packaging") or "jar"
+    xml_start = result.stdout.index("<")
+    root = ET.fromstring(result.stdout[xml_start:])
 
-    parent_elem = next((c for c in root if _strip_ns(c.tag) == "parent"), None)
-    if parent_elem is not None and (group_id is None or version is None):
-        group_id = group_id or _child_text(parent_elem, "groupId")
-        version = version or _child_text(parent_elem, "version")
+    # Aggregator/multi-module POMs print a <projects> wrapper containing
+    # one <project> per module; a single-module POM prints <project> directly.
+    project_elem = root if _strip_ns(root.tag) == "project" else next(
+        c for c in root if _strip_ns(c.tag) == "project"
+    )
 
-        relative_path = _child_text(parent_elem, "relativePath")
-        if relative_path is None:
-            relative_path = "../pom.xml"
-        if relative_path:
-            parent_pom = (pom_path.parent / relative_path).resolve()
-            if parent_pom.is_file() and (group_id is None or version is None):
-                p_group, _, p_version, _ = _resolve_gav(parent_pom)
-                group_id = group_id or p_group
-                version = version or p_version
+    group_id = _child_text(project_elem, "groupId")
+    artifact_id = _child_text(project_elem, "artifactId")
+    version = _child_text(project_elem, "version")
+    packaging = _child_text(project_elem, "packaging") or "jar"
 
     return group_id, artifact_id, version, packaging
 
 
 def _discover_jar_modules(
-        pom_path: Path, seen: set[Path] | None = None
+        pom_path: Path, project_dir: Path, seen: set[Path] | None = None
 ) -> list[tuple[str, str, str]]:
     """Recursively walk <module> entries from pom_path, returning
     (groupId, artifactId, version) for every jar-packaged module found,
@@ -175,9 +175,9 @@ def _discover_jar_modules(
     for name in module_names:
         child_pom = pom_path.parent / name / "pom.xml"
         if child_pom.is_file():
-            gavs.extend(_discover_jar_modules(child_pom, seen))
+            gavs.extend(_discover_jar_modules(child_pom, project_dir, seen))
 
-    group_id, artifact_id, version, packaging = _resolve_gav(pom_path)
+    group_id, artifact_id, version, packaging = _resolve_gav(pom_path, project_dir)
     if packaging == "jar" and group_id and artifact_id and version:
         gavs.append((group_id, artifact_id, version))
 

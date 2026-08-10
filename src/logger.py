@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import sys
 import threading
@@ -419,3 +420,13 @@ class FPMinerLogger:
         refactor_success and refactor_failure each broken down by
         annotation_only / real_changes; refactor_errored;
         refactor_not_possible)."""
+        summary_path = self.run_dir / "summary.json"
+        try:
+            with self._lock:
+                snapshot = json.loads(json.dumps(self._counts))
+                with open(summary_path, "w", encoding="utf-8") as f:
+                    json.dump(snapshot, f, indent=2)
+        except Exception:
+            self.logger.exception("Failed to write summary.json")
+            return
+        self.logger.info("Run complete. Summary written to %s", summary_path)

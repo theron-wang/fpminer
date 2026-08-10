@@ -1,6 +1,7 @@
 import io
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -16,7 +17,7 @@ from utils import CheckerError, parse_errors_from_checker_output
 
 ANALYSIS_AGENT_ROOT = Path("analysis_agent")
 ANALYSIS_AGENT_LOGS = ANALYSIS_AGENT_ROOT / "logs"
-REPLAY_CWD_REGEX = re.compile(r"^log_info 'Working directory: (?P<cwd>.*)'$")
+REPLAY_CWD_REGEX = re.compile(r"log_info 'Working directory: (?P<cwd>.*)'")
 
 
 def run_analysis_agent(target_name: str, target_url: str, tool_name: str, tool_url: str) -> \
@@ -30,11 +31,11 @@ def run_analysis_agent(target_name: str, target_url: str, tool_name: str, tool_u
     except KeyboardInterrupt:
         raise
     except Exception:
+        raise
         pass
 
     os.makedirs(ANALYSIS_AGENT_ROOT, exist_ok=True)
 
-    # Run with Ubuntu 22.04, or else AnalysisAgent will fail to create a Docker container under this venv
     result = subprocess.run(
         [
             sys.executable,
@@ -49,7 +50,10 @@ def run_analysis_agent(target_name: str, target_url: str, tool_name: str, tool_u
             "--cycle-budget", "40",
             "--time-limit-seconds", "10800",
             "--disable-exit-attempt",
-            "--docker-image", "ubuntu:22.04"
+            # In case you encounter errors with AnalysisAgent being unable to start new containers, you can
+            # uncomment the following line for it to run successfully. Note that this will break the replay
+            # because it will not generate launch.sh.
+            # "--docker-image", "ubuntu:22.04"
         ],
         cwd=ANALYSIS_AGENT_ROOT,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
@@ -158,9 +162,9 @@ def _instrument_replay_for_output(path_to_replay_sh: Path, tool_name: str, outpu
 
 
 def _reconstruct(target_name: str, tool_name: str, output_dir: str) -> str:
-    classpath_filename = "fp-miner-classpath.txt"
+    extracted_errors_filename = "fp-miner-classpath.txt"
 
-    existing_classpath_file = _get_target_directory(target_name) / classpath_filename
+    existing_classpath_file = _get_target_directory(target_name) / extracted_errors_filename
     if os.path.exists(existing_classpath_file):
         with open(existing_classpath_file, "r") as f:
             return f.read()
@@ -182,26 +186,32 @@ def _reconstruct(target_name: str, tool_name: str, output_dir: str) -> str:
     last_attempt = max(f for f in os.listdir(most_recent_log_path) if f.startswith("attempt_"))
     most_recent_log_path /= last_attempt
 
+    replay_output_dir = Path("analysis_agent/replay") / tool_name / target_name
+
+    # It seems that AnalysisAgent's implementation of attempt_number is incorrect, as we have to
+    # pass in the attempt_# directory of the output anyway. So, we set it to 1, so we always have
+    # the replay put in attempt_1/, and then we can find the replay.sh there.
     success = produce_replay(
         log_dir=most_recent_log_path,
-        output_dir=Path("replay"),
+        output_dir=replay_output_dir,
         attempt_number=1,
         tool_name=tool_name,
         target_name=target_name,
-        require_successful_docker=True
+        require_successful_docker=False
     )
 
     if not success:
         raise RuntimeError(f"Failed to produce replay for target {target_name} and tool {tool_name}")
 
-    replay_dir = Path("replay") / last_attempt
+    # Since we pass in attempt_number=1 above, the replay.sh will be in attempt_1/
+    replay_dir = replay_output_dir / "attempt_1"
     replay_sh_path = Path(replay_dir).absolute() / "replay.sh"
 
     working_dir = REPLAY_CWD_REGEX.search(replay_sh_path.read_text()).group("cwd")
     working_dir = Path(working_dir)
 
     # Write into /app so it gets pulled out along with the rest of the archive below
-    classpath_output_path = working_dir / classpath_filename
+    classpath_output_path = working_dir / extracted_errors_filename
     instrumented_replay_sh = _instrument_replay_for_output(replay_sh_path, tool_name, str(classpath_output_path))
 
     result = subprocess.run(["./launch.sh", "--build"], capture_output=True, text=True, check=True, cwd=replay_dir)
@@ -213,9 +223,12 @@ def _reconstruct(target_name: str, tool_name: str, output_dir: str) -> str:
     image_name = match.group(1)
 
     client = docker.from_env()
+
+    shutil.rmtree(output_dir, ignore_errors=True)
+
     os.makedirs(output_dir, exist_ok=True)
 
-    container = client.containers.run_for_single_checker_target_pair(
+    container = client.containers.run(
         image=image_name,
         detach=True,
         entrypoint=["/bin/bash", "/replay.sh"],
@@ -243,10 +256,10 @@ def _reconstruct(target_name: str, tool_name: str, output_dir: str) -> str:
         container.remove(force=True)
         client.images.remove(image_name, force=True)
 
-    extracted_classpath_path = Path(output_dir) / str(working_dir).strip('/') / classpath_filename
-    if not extracted_classpath_path.exists():
+    extracted_errors_filepath = Path(output_dir) / str(working_dir).strip('/') / extracted_errors_filename
+    if not extracted_errors_filepath.exists():
         raise RuntimeError(
-            f"Expected {classpath_filename} was not found in extracted output at {extracted_classpath_path}"
+            f"Expected {extracted_errors_filename} was not found in extracted output at {extracted_errors_filepath}"
         )
 
-    return extracted_classpath_path.read_text()
+    return extracted_errors_filepath.read_text()

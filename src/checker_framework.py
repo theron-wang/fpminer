@@ -14,7 +14,7 @@ CHECKER_FRAMEWORK_URL = (
     f"https://github.com/typetools/checker-framework/releases/download/"
     f"checker-framework-{CHECKER_FRAMEWORK_VERSION}/checker-framework-{CHECKER_FRAMEWORK_VERSION}.zip"
 )
-DOWNLOAD_TO = Path("tools/cf")
+DOWNLOAD_TO = Path("tools/cf").resolve()
 
 
 def _download(url: str):

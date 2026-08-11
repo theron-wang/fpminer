@@ -4,8 +4,8 @@ A pipeline for mining and reducing Checker Framework false positive patterns acr
 
 FPMiner runs in two steps:
 
-1. **Analysis** — For each target repository, configure and run the specified Checker Framework checkers to identify false positives.
-2. **Refactoring** — For each error found during analysis, a refactoring agent generates a patch that removes the checker error while preserving the original semantics of the code. This step is parallelized, so increasing the number of CPU cores available to the process will greatly improve output speeds.
+1. **Analysis** — For each target repository, configure and run the specified Checker Framework checkers to identify false positives. This is step is parallelized across targets for each checker.
+2. **Refactoring** — For each error found during analysis, a refactoring agent generates a patch that removes the checker error while preserving the original semantics of the code. This step is parallelized across errors for each target/checker pair.
 
 ---
 
@@ -61,8 +61,29 @@ MAX_PROCESSES=
 
 ## Usage
 
+Run the tool with a file containing the checkers to analyze and a file containing the targets:
+
 ```bash
-py src/main.py -c checkers.txt -t targets.jsonl
+.venv/bin/python src/main.py -c <checkers-file> -t <targets-file> [--dry-run] [--setup-only]
+```
+
+Both `-c` and `-t` are required.
+
+### Optional Arguments
+
+* `--dry-run` — Run only one error for each target/checker pair instead of processing all errors.
+* `--setup-only` — Run the setup phase for each target/checker pair, then skip the refactoring step.
+
+For example:
+
+```bash
+.venv/bin/python src/main.py -c checkers.txt -t targets.jsonl --dry-run
+```
+
+or:
+
+```bash
+.venv/bin/python src/main.py -c checkers.txt -t targets.jsonl --setup-only
 ```
 
 | Argument | Description |

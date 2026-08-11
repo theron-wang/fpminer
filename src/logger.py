@@ -4,12 +4,11 @@ import json
 import logging
 import sys
 import threading
-import traceback
 from pathlib import Path
 from typing import Any, Optional, Literal
 
 from refactoring.refactor_agent import RefactorAgentRun
-from utils import CheckerError, timestamp
+from utils import CheckerError, timestamp, ExcInfo
 
 LOGGER_LEVEL = logging.INFO
 
@@ -373,7 +372,7 @@ class FPMinerLogger:
             self,
             scope: str,
             target_name: str,
-            exc: BaseException,
+            exc: ExcInfo,
             checker: str = "",
             index: Optional[int] = None,
     ) -> None:
@@ -387,16 +386,17 @@ class FPMinerLogger:
         total_errors for error-scoped crashes, via the log_error_start call
         that already ran for that error before processing crashed.
         """
-        tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        exc_type, exc_value, tb = exc
+        exc_type_name = exc_type.__name__ if exc_type is not None else "UnknownException"
+
         self.logger.error(
             "[%s]%s Unhandled exception at '%s' level: %s: %s",
             target_name,
             f"/{checker}" if checker else "",
             scope,
-            type(exc).__name__,
-            exc,
+            exc_type_name,
+            exc_value
         )
-        self.logger.debug(tb)
 
         self._append_block("crashes.log", [
             ("Timestamp", timestamp()),
@@ -404,8 +404,8 @@ class FPMinerLogger:
             ("Target", target_name),
             ("Checker", checker),
             ("ErrorIndex", "" if index is None else str(index)),
-            ("ExceptionType", type(exc).__name__),
-            ("Message", str(exc)),
+            ("ExceptionType", exc_type_name),
+            ("Message", str(exc_value)),
             ("Traceback", tb),
         ])
 

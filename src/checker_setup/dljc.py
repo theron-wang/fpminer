@@ -24,7 +24,8 @@ def run_dljc(target_name: str, target_url: str, tool_name: str) -> list[CheckerE
     if TARGET_DLJC_CACHE.get(target_name) is False:
         return None
 
-    if not os.path.exists(f"targets/{target_name}"):
+    if not os.path.exists(f"targets/{target_name}") or next(Path(f"targets/{target_name}").rglob("*.java"),
+                                                            None) is None:
         _clone_target(target_name, target_url)
 
     os.environ.setdefault("CHECKERFRAMEWORK", str(get_path_to_checker_dir().resolve()))
@@ -56,7 +57,7 @@ def run_dljc(target_name: str, target_url: str, tool_name: str) -> list[CheckerE
         ])
 
         errors = run_checker_and_parse_errors(output_cmd, Path(f"targets/{target_name}"))
-        if errors is None:
+        if errors is None or any(e for e in errors if e.is_compilation_error()):
             continue
 
         TARGET_DLJC_CACHE[target_name] = True

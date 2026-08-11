@@ -1,9 +1,12 @@
 import os
 import re
 import subprocess
+import traceback
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
+from types import TracebackType
+from typing import TypeAlias
 
 from attr import dataclass
 
@@ -15,19 +18,23 @@ _number_regex = re.compile(r"\d+")
 
 _content_regex = re.compile(r"(?P<prefix>.*):\s*(?P<fields>.*)")
 
-_gradle_augment_script = Path("scripts") / "fpminer-javacompileaugment.gradle"
+GRADLE_AUGMENT_SCRIPT_NAME = "fpminer-javacompileaugment.gradle"
+GRADLE_AUGMENT_SCRIPT_PATH = Path("scripts") / GRADLE_AUGMENT_SCRIPT_NAME
+
+ExcInfo: TypeAlias = tuple[type[BaseException], BaseException, str]
 
 
-def ensure_unbounded_diagnostics_and_cf_only_errors(checker_cmd: str) -> str:
+def ensure_unbounded_diagnostics_and_cf_only_errors(checker_cmd: str, docker: bool = False) -> str:
     """
     Ensures that any checker command ran with javac, gradlew, or mvnw
     sets -Xmaxwarns and -Xmaxerrs to a very high number, so that we don't miss any errors.
     Also sets -Xlint:none to avoid any javac warnings (like deprecation, unchecked, etc.)
+    :param docker: True if the checker is being run in a docker container, false otherwise
     :param checker_cmd: The checker command
     :return: The checker command with the arguments added
     """
     if "gradlew" in checker_cmd:
-        return f"{checker_cmd} --init-script {_gradle_augment_script}"
+        return f"{checker_cmd} --init-script {f"/{GRADLE_AUGMENT_SCRIPT_NAME}" if docker else GRADLE_AUGMENT_SCRIPT_PATH}"
 
     if "mvnw" in checker_cmd:
         arg = "-Xmaxwarns 999999 -Xmaxerrs 999999 -Xlint:none"
@@ -44,6 +51,7 @@ def run_checker_and_parse_errors(checker_cmd: str, cwd: Path) -> list[CheckerErr
     :param cwd: The working directory
     :return: The errors, or None if something failed
     """
+    # Use bash and input instead of just checker_cmd because checker_cmd may exceed the maximum command length on some systems
     result = subprocess.run(
         ["bash"],
         input=checker_cmd,
@@ -73,6 +81,20 @@ def parse_errors_from_checker_output(output: str) -> list[CheckerError]:
         raw = match.group().strip()
         errors.append(CheckerError(file_path, line_number, identifier, message, content, raw))
     return errors
+
+
+def make_picklable_exc_info(
+        exc_info: tuple[type[BaseException], BaseException, TracebackType] | tuple[None, None, None]
+) -> ExcInfo:
+    """
+    Convert a raw (exc_type, exc_value, exc_tb) tuple — e.g. from sys.exc_info()
+    or an `except ... as e` block — into a picklable version by replacing the
+    traceback object with its formatted string. Safe to pass across
+    multiprocessing process boundaries.
+    """
+    exc_type, exc_value, exc_tb = exc_info
+    formatted_tb = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    return exc_type, exc_value, formatted_tb
 
 
 def _split_message(message: str) -> tuple[str, set[str] | None]:

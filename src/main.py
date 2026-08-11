@@ -3,7 +3,9 @@ from __future__ import annotations
 import faulthandler
 import json
 import os
+import platform
 import subprocess
+import sys
 from dataclasses import dataclass
 from multiprocessing import Pool
 from pathlib import Path
@@ -22,7 +24,7 @@ from refactoring.refactor_agent import RefactorAgent, RefactorAgentRun
 from refactoring.refactor_result_handler import RefactorResultHandler
 from target_project import TargetProject
 from utils import run_checker_and_parse_errors, CheckerError, timestamp, \
-    ensure_unbounded_diagnostics_and_cf_only_errors
+    ensure_unbounded_diagnostics_and_cf_only_errors, ExcInfo, make_picklable_exc_info
 
 DRY_RUN_MAX_ERRORS = 1
 
@@ -43,6 +45,16 @@ def ensure_posix_and_docker():
         exit(1)
 
 
+def _configure_multiprocessing() -> None:
+    # WSL has a weird IO-related crash without this
+    import multiprocessing
+    try:
+        if "microsoft" in platform.uname().release.lower():
+            multiprocessing.set_start_method("fork", force=True)
+    except Exception:
+        return False
+
+
 @dataclass
 class ProcessResult:
     """Picklable summary of one process_one_error() run.
@@ -58,13 +70,13 @@ class ProcessResult:
     errors_in_minimized: list[CheckerError] | None = None
     expected_error: CheckerError | None = None
     refactor_run: RefactorAgentRun | None = None
-    exc: BaseException | None = None
+    exc: ExcInfo | None = None
 
 
 @dataclass
 class SetupFailure:
     target_name: str
-    exc: Exception
+    exc: ExcInfo
 
 
 def _log_cf_error_refactor_result(logger: FPMinerLogger, project: TargetProject, result: ProcessResult) -> None:
@@ -112,9 +124,9 @@ def _setup_checker_for_project_star(args: tuple) -> TargetProject | SetupFailure
         return setup_checker_for_project(*args)
     except KeyboardInterrupt:
         raise
-    except Exception as exc:
+    except Exception:
         target, _, _, _ = args
-        return SetupFailure(target, exc)
+        return SetupFailure(target, make_picklable_exc_info(sys.exc_info()))
 
 
 def setup_checker_for_project(target: Target, checker: str, project: TargetProject | None,
@@ -139,7 +151,6 @@ def run_for_single_checker_target_pair(run_id: str, project: TargetProject, chec
 
     logger.start_target(project.target_name, checker)
     errors = project.errors[:DRY_RUN_MAX_ERRORS] if dry_run else project.errors
-    logger.log_total_errors(project.target_name, checker, len(project.errors))
     result_handler = RefactorResultHandler(run_id, project.target_name, checker)
 
     repo_dir = project.get_current_workspace_repo_dir()
@@ -155,8 +166,9 @@ def run_for_single_checker_target_pair(run_id: str, project: TargetProject, chec
                     result_handler.handle_refactor_result(result.refactor_run, result.index)
         except KeyboardInterrupt:
             raise
-        except Exception as exc:
-            logger.log_crash(scope="error", target_name=project.target_name, exc=exc)
+        except Exception:
+            logger.log_crash(scope="error", target_name=project.target_name,
+                             exc=make_picklable_exc_info(sys.exc_info()))
 
     logger.finish_target(project.target_name)
 
@@ -213,8 +225,8 @@ def process_one_error(index: int, error: CheckerError, project: TargetProject, r
 
     except KeyboardInterrupt:
         raise
-    except Exception as exc:
-        return ProcessResult(index=index + 1, outcome="crash", exc=exc)
+    except Exception:
+        return ProcessResult(index=index + 1, outcome="crash", exc=make_picklable_exc_info(sys.exc_info()))
 
 
 def main():
@@ -266,8 +278,9 @@ def main():
         specimin.setup()
         checker_framework.setup()
         differential_tester.setup()
-    except Exception as exc:
-        logger.log_crash(scope="pipeline_setup", target_name="<setup>", exc=exc)
+        _configure_multiprocessing()
+    except Exception:
+        logger.log_crash(scope="pipeline_setup", target_name="<setup>", exc=make_picklable_exc_info(sys.exc_info()))
         logger.finalize()
         exit(1)
 
@@ -287,6 +300,7 @@ def main():
                     continue
 
                 logger.log_setup_method(project.target_name, checker, project.checker_setup_type)
+                logger.log_total_errors(project.target_name, checker, len(project.errors))
 
                 curr_proj = projects.get(project.target_name, None)
 
@@ -298,8 +312,9 @@ def main():
                                                                                project.target_name)
                     except KeyboardInterrupt:
                         raise
-                    except Exception as exc:
-                        logger.log_crash(scope="target_setup", target_name=project.target_name, exc=exc)
+                    except Exception:
+                        logger.log_crash(scope="target_setup", target_name=project.target_name,
+                                         exc=make_picklable_exc_info(sys.exc_info()))
 
         if not args.setup_only:
             for target in targets:
@@ -309,8 +324,9 @@ def main():
                                                        dry_run=args.dry_run)
                 except KeyboardInterrupt:
                     raise
-                except Exception as exc:
-                    logger.log_crash(scope="target", target_name=target.name, exc=exc)
+                except Exception:
+                    logger.log_crash(scope="target", target_name=target.name,
+                                     exc=make_picklable_exc_info(sys.exc_info()))
 
         logger.finish_checker(checker)
 

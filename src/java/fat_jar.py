@@ -13,7 +13,7 @@ def build_gradle_jar(directory: Path) -> list[Path]:
         check=True,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
-    return list(directory.rglob("target/*.jar"))
+    return list(directory.rglob("build/libs/*-fpMiner.jar"))
 
 
 def build_maven_jar(pom_xml_path: Path) -> list[Path]:

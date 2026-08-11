@@ -13,11 +13,13 @@ import tree_sitter_bash
 from analysis_agent.mini_orchestrator import sanitize_for_filename
 from analysis_agent.replay_producer import produce_replay
 from tree_sitter import Language, Parser
-from utils import CheckerError, parse_errors_from_checker_output
+from utils import CheckerError, parse_errors_from_checker_output, ensure_unbounded_diagnostics_and_cf_only_errors, \
+    GRADLE_AUGMENT_SCRIPT_PATH, GRADLE_AUGMENT_SCRIPT_NAME
 
 ANALYSIS_AGENT_ROOT = Path("analysis_agent")
 ANALYSIS_AGENT_LOGS = ANALYSIS_AGENT_ROOT / "logs"
 REPLAY_CWD_REGEX = re.compile(r"log_info 'Working directory: (?P<cwd>.*)'")
+JAVA_FILE_ARG_REGEX = re.compile(r'(?<!\S)(?P<path>[^\s"\']+\.java)(?!\S)')
 
 
 def run_analysis_agent(target_name: str, target_url: str, tool_name: str, tool_url: str) -> \
@@ -124,11 +126,41 @@ def _find_target_command_range(
     return matches[-1]
 
 
+def _generalize_single_java_file_target(checker_cmd: str) -> str:
+    """
+    If `checker_cmd` targets exactly one hard-coded `.java` file (as opposed to a command
+    that already covers a tree via -sourcepath/find/glob), rewrite it to instead process
+    every `.java` file under that file's directory. This avoids under-reporting false
+    positives that only manifest when compiling the target's full source tree together.
+    AnalysisAgent _may_ sometimes give output where only one or a few files are mentioned,
+    but we should run the analysis on the ENTIRE project.
+
+    Leaves the command unchanged if:
+    - it references zero or more than one `.java` file explicitly (ambiguous to rewrite
+      safely, or already covers multiple files), or
+    - it invokes gradlew/mvnw, which already build the whole module/project regardless
+      of any single file mentioned on the command line.
+    """
+    if "gradlew" in checker_cmd or "mvnw" in checker_cmd:
+        return checker_cmd
+
+    matches = list(JAVA_FILE_ARG_REGEX.finditer(checker_cmd))
+    # Use 10 as a heuristic threshold for "more than one" because some commands may have a few (like 2 or 3)
+    if not matches or len(matches) > 10:
+        return checker_cmd
+
+    match = matches[0]
+
+    find_all = "$(find . -name '*.java')"
+    return checker_cmd[:match.start()] + find_all + checker_cmd[match.end():]
+
+
 def _instrument_replay_for_output(path_to_replay_sh: Path, orig_tool_name: str, new_tool_name: str,
                                   output_path: str) -> Path:
     """
     Rewrite replay.sh so that the command running the annotation processor for `tool_name`
-    also redirects its stderr to `output_path` (a path inside the container).
+    (a) has unbounded-diagnostics args added via ensure_unbounded_diagnostics_and_cf_only_errors,
+    and (b) has its stderr redirected to `output_path` (a path inside the container).
 
     Handles the tool's command living inside a heredoc (e.g. `bash <<'EOF' ... EOF`), not
     just at the top level of replay.sh.
@@ -145,12 +177,14 @@ def _instrument_replay_for_output(path_to_replay_sh: Path, orig_tool_name: str, 
     if target_range is None:
         raise RuntimeError(f"Could not find a command referencing {orig_tool_name} in {path_to_replay_sh}")
 
-    _, target_end = target_range
+    target_start, target_end = target_range
 
-    # Insert a stderr redirect right after the matched command, wherever it lives (including
-    # inside a heredoc), without changing what the command otherwise does.
-    redirect = f" 2> {output_path}".encode("utf-8")
-    instrumented_source = source[:target_end] + redirect + source[target_end:]
+    original_command = source[target_start:target_end].decode("utf-8")
+    generalized_command = _generalize_single_java_file_target(original_command)
+    augmented_command = ensure_unbounded_diagnostics_and_cf_only_errors(generalized_command)
+    replacement = f"{augmented_command} 2> {output_path}".encode("utf-8")
+
+    instrumented_source = source[:target_start] + replacement + source[target_end:]
     instrumented_source = instrumented_source.replace(orig_tool_name.encode("utf-8"), new_tool_name.encode("utf-8"))
 
     instrumented_path = path_to_replay_sh.with_name(
@@ -237,14 +271,17 @@ def _reconstruct(target_name: str, tool_name: str, output_dir: str) -> str:
         volumes={
             str(instrumented_replay_sh): {
                 "bind": "/replay.sh",
-                "mode": "ro",
+                "mode": "ro"
+            },
+            str(GRADLE_AUGMENT_SCRIPT_PATH.resolve()): {
+                "bind": "/" + GRADLE_AUGMENT_SCRIPT_NAME,
+                "mode": "ro"
             }
         }
     )
 
-    container.wait()
-
     try:
+        container.wait()
         bits, _ = container.get_archive(working_dir)
 
         tar_stream = io.BytesIO()
@@ -253,7 +290,7 @@ def _reconstruct(target_name: str, tool_name: str, output_dir: str) -> str:
         tar_stream.seek(0)
 
         with tarfile.open(fileobj=cast(IO[bytes], tar_stream)) as tar:
-            tar.extractall(path=output_dir)
+            tar.extractall(path=output_dir, filter="data")
     finally:
         container.remove(force=True)
         client.images.remove(image_name, force=True)
@@ -264,4 +301,7 @@ def _reconstruct(target_name: str, tool_name: str, output_dir: str) -> str:
             f"Expected {extracted_errors_filename} was not found in extracted output at {extracted_errors_filepath}"
         )
 
-    return extracted_errors_filepath.read_text()
+    replace_regex = re.compile(f"^/{str(working_dir).strip('/')}/")
+    replace_with = f"{str(Path(output_dir).absolute())}/"
+
+    return replace_regex.sub(replace_with, extracted_errors_filepath.read_text())

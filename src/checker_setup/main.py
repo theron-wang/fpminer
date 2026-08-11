@@ -20,7 +20,6 @@ def setup_checker(target_name: str, target_url: str, tool_name: str) -> tuple[
     :param tool_name: The tool name
     :return: The errors found by the checker, or None if all failed
     """
-    return "dljc", []
 
     errors = run_dljc(target_name, target_url, tool_name)
 
